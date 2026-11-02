@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <base target="_top">
+  <meta charset="utf-8">
+  <meta name="theme-color" content="#F5C400">
+  <?!= include('Styles'); ?>
+</head>
+<body>
+  <div class="splash" id="splash" style="position:fixed;inset:0;z-index:90;background:#F5C400;display:grid;place-items:center;text-align:center;font-family:Arial,sans-serif"><div><div style="width:120px;height:120px;margin:0 auto 10px"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs><clipPath id="cxSplash"><rect width="512" height="512" rx="96"/></clipPath></defs><g clip-path="url(#cxSplash)"><rect width="512" height="512" fill="#F5C400"/>
+  <rect x="14" y="14" width="484" height="484" rx="84" fill="none" stroke="#16348A" stroke-width="14"/>
+  <rect x="0" y="356" width="512" height="156" fill="#16348A"/>
+  <rect x="0" y="352" width="512" height="22" fill="#C8201E"/></g>
+  <rect x="14" y="14" width="484" height="484" rx="84" fill="none" stroke="#16348A" stroke-width="14"/>
+  <text x="256" y="452" text-anchor="middle" font-family="'Alfa Slab One',Rockwell,Georgia,serif" font-size="58" fill="#fff" letter-spacing="2" transform="translate(4 4)">MATCHBOX</text>
+  <text x="256" y="452" text-anchor="middle" font-family="'Alfa Slab One',Rockwell,Georgia,serif" font-size="58" fill="#F5C400" letter-spacing="2">MATCHBOX</text>
+  <g transform="translate(0 4)">
+    <path d="M70 312 L70 270 Q74 250 100 246 L162 238 Q192 190 238 184 L312 184 Q348 188 372 236 L420 244 Q446 250 446 274 L446 312 Z" fill="#16348A"/>
+    <path d="M186 238 Q206 204 240 198 L266 198 L266 238 Z M282 198 L310 198 Q334 202 350 238 L282 238 Z" fill="#FFF3B8"/>
+    <rect x="70" y="276" width="376" height="10" fill="#C8201E"/>
+    <circle cx="150" cy="312" r="40" fill="#1B1B1B"/><circle cx="150" cy="312" r="17" fill="#D9D9D9"/>
+    <circle cx="370" cy="312" r="40" fill="#1B1B1B"/><circle cx="370" cy="312" r="17" fill="#D9D9D9"/>
+  </g>
+  <circle cx="104" cy="104" r="60" fill="#C8201E" stroke="#16348A" stroke-width="9"/>
+  <text x="104" y="88" text-anchor="middle" font-family="Oswald,'Arial Narrow',sans-serif" font-weight="600" font-size="26" fill="#fff">No</text>
+  <text x="104" y="138" text-anchor="middle" font-family="Oswald,'Arial Narrow',sans-serif" font-weight="600" font-size="54" fill="#fff">1</text>
+</svg></div><h1 style="color:#16348A;margin:0">MATCHBOX</h1><p style="color:#C8201E">Abrindo a coleção…</p></div></div>
+
+  <header class="topo" id="topo">
+    <div class="marca">
+      <div class="logo-mini" aria-hidden="true">LOGO</div>
+      <div class="titulo"><h1>MATCHBOX</h1><small>Series · Coleção Marco Geus</small></div>
+      <button class="menu-btn" id="btnMenu" aria-label="Menu">&#9776;</button>
+    </div>
+    <nav class="abas" id="abas">
+      <button class="aba ativa" data-aba="Lesney">Lesney <span id="qtdLesney"></span></button>
+      <button class="aba" data-aba="Superfast">Superfast <span id="qtdSuperfast"></span></button>
+    </nav>
+  </header>
+
+  <section class="perfil" id="perfil">
+    <div class="perfil-linha">
+      <div class="avatar" aria-hidden="true">LOGO</div>
+      <div class="stats">
+        <div><b id="stItens">–</b><span>miniaturas</span></div>
+        <div><b id="stModelos">–</b><span>modelos</span></div>
+        <div><b id="stFotos">–</b><span>com foto minha</span></div>
+      </div>
+    </div>
+    <div class="bio"><b>Marco Geus</b><span id="bioSerie">Coleção Matchbox · Lesney 1-75</span><span id="bioValor"></span></div>
+    <button class="status-seg" id="statusSeg">Verificando segurança dos dados…</button>
+    <div class="highlights" id="filtros"></div>
+  </section>
+
+  <section class="busca" id="busca">
+    <div class="busca-linha">
+      <input id="q" type="search" placeholder="Buscar nome, código Mack, cor, roda…" autocomplete="off">
+      <button class="btn-cam" id="btnCam" aria-label="Buscar por foto" title="Buscar por foto"><svg viewBox="0 0 24 24" width="24" height="24"><path fill="currentColor" d="M9 3 7.2 5H4a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-3.2L15 3H9zm3 5a5 5 0 1 1 0 10 5 5 0 0 1 0-10zm0 2a3 3 0 1 0 0 6 3 3 0 0 0 0-6z"/></svg></button>
+    </div>
+    <div class="vistas" id="vistas">
+      <button data-vista="grade" class="on" aria-label="Ver em grade"><svg viewBox="0 0 24 24" width="22" height="22"><path fill="currentColor" d="M3 3h5v5H3zm6.5 0h5v5h-5zM16 3h5v5h-5zM3 9.5h5v5H3zm6.5 0h5v5h-5zm6.5 0h5v5h-5zM3 16h5v5H3zm6.5 0h5v5h-5zm6.5 0h5v5h-5z"/></svg></button>
+      <button data-vista="lista" aria-label="Ver em lista"><svg viewBox="0 0 24 24" width="22" height="22"><path fill="currentColor" d="M3 4h4v4H3zm6 1h12v2H9zM3 10h4v4H3zm6 1h12v2H9zM3 16h4v4H3zm6 1h12v2H9z"/></svg></button>
+    </div>
+  </section>
+  <div class="resumo" id="resumo"></div>
+  <main class="lista" id="lista"></main>
+
+  <button class="fab" id="fab" aria-label="Adicionar miniatura">+</button>
+
+  <section class="painel" id="pDetalhe" aria-hidden="true">
+    <div class="painel-topo"><button class="btn-ico" id="dVoltar" aria-label="Voltar">&larr;</button><h2 id="dTitulo"></h2><button class="btn-ico" id="dEditar">Editar</button></div>
+    <div class="conteudo" id="dConteudo"></div>
+  </section>
+
+  <section class="painel" id="pForm" aria-hidden="true">
+    <div class="painel-topo"><button class="btn-ico" data-fechar>&larr;</button><h2 id="fTitulo">Nova miniatura</h2><button class="btn-ico" id="fSalvarTopo">Salvar</button></div>
+    <form class="conteudo" id="form" autocomplete="off" novalidate></form>
+  </section>
+
+  <section class="painel" id="pFotoBusca" aria-hidden="true">
+    <div class="painel-topo"><button class="btn-ico" data-fechar>&larr;</button><h2>Buscar por foto</h2><button class="btn-ico" id="fbOutra">Outra foto</button></div>
+    <div class="conteudo" id="fbConteudo"></div>
+  </section>
+
+  <section class="painel" id="pProcura" aria-hidden="true">
+    <div class="painel-topo"><button class="btn-ico" data-fechar>&larr;</button><h2>Lista de procura</h2><button class="btn-ico" id="prCompartilhar">Enviar</button></div>
+    <div class="conteudo" id="prConteudo"></div>
+  </section>
+
+  <section class="painel" id="pComparar" aria-hidden="true">
+    <div class="painel-topo"><button class="btn-ico" data-fechar>&larr;</button><h2 id="cTitulo">Comparar</h2></div>
+    <div class="conteudo" id="cConteudo"></div>
+  </section>
+
+  <section class="painel" id="pEditor" aria-hidden="true">
+    <div class="painel-topo"><button class="btn-ico" id="edCancelar">&larr;</button><h2 id="edTitulo">Ajustar foto</h2><button class="btn-ico" id="edSalvar">Salvar</button></div>
+    <div class="conteudo" id="edConteudo"></div>
+  </section>
+
+  <section class="painel" id="pEnq" aria-hidden="true">
+    <div class="painel-topo"><button class="btn-ico" data-fechar>&larr;</button><h2>Enquadrar miniatura</h2><button class="btn-ico" id="enqSalvar">Salvar</button></div>
+    <div class="conteudo" id="enqConteudo"></div>
+  </section>
+
+  <section class="painel" id="pValores" aria-hidden="true">
+    <div class="painel-topo"><button class="btn-ico" data-fechar>&larr;</button><h2>Valores da coleção</h2></div>
+    <div class="conteudo" id="vConteudo"></div>
+  </section>
+
+  <section class="painel" id="pInstalar" aria-hidden="true">
+    <div class="painel-topo"><button class="btn-ico" data-fechar>&larr;</button><h2>Ícone na tela do celular</h2></div>
+    <div class="conteudo" id="iConteudo"></div>
+  </section>
+
+  <section class="painel" id="pSeg" aria-hidden="true">
+    <div class="painel-topo"><button class="btn-ico" data-fechar>&larr;</button><h2>Segurança dos dados</h2></div>
+    <div class="conteudo" id="sConteudo"></div>
+  </section>
+
+  <div class="menu" id="menu"><nav id="menuNav"></nav></div>
+  <div class="toast" id="toast"></div>
+  <input type="file" id="arquivoFoto" accept="image/*" capture="environment" hidden>
+  <input type="file" id="arquivoGaleria" accept="image/*" multiple hidden>
+  <input type="file" id="arquivoBusca" accept="image/*" hidden>
+  <input type="file" id="arquivoBuscaCam" accept="image/*" capture="environment" hidden>
+  <div class="peek" id="peek" aria-hidden="true"></div>
+  <template id="tplLogo"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs><clipPath id="cxLogo"><rect width="512" height="512" rx="96"/></clipPath></defs><g clip-path="url(#cxLogo)"><rect width="512" height="512" fill="#F5C400"/>
+  <rect x="14" y="14" width="484" height="484" rx="84" fill="none" stroke="#16348A" stroke-width="14"/>
+  <rect x="0" y="356" width="512" height="156" fill="#16348A"/>
+  <rect x="0" y="352" width="512" height="22" fill="#C8201E"/></g>
+  <rect x="14" y="14" width="484" height="484" rx="84" fill="none" stroke="#16348A" stroke-width="14"/>
+  <text x="256" y="452" text-anchor="middle" font-family="'Alfa Slab One',Rockwell,Georgia,serif" font-size="58" fill="#fff" letter-spacing="2" transform="translate(4 4)">MATCHBOX</text>
+  <text x="256" y="452" text-anchor="middle" font-family="'Alfa Slab One',Rockwell,Georgia,serif" font-size="58" fill="#F5C400" letter-spacing="2">MATCHBOX</text>
+  <g transform="translate(0 4)">
+    <path d="M70 312 L70 270 Q74 250 100 246 L162 238 Q192 190 238 184 L312 184 Q348 188 372 236 L420 244 Q446 250 446 274 L446 312 Z" fill="#16348A"/>
+    <path d="M186 238 Q206 204 240 198 L266 198 L266 238 Z M282 198 L310 198 Q334 202 350 238 L282 238 Z" fill="#FFF3B8"/>
+    <rect x="70" y="276" width="376" height="10" fill="#C8201E"/>
+    <circle cx="150" cy="312" r="40" fill="#1B1B1B"/><circle cx="150" cy="312" r="17" fill="#D9D9D9"/>
+    <circle cx="370" cy="312" r="40" fill="#1B1B1B"/><circle cx="370" cy="312" r="17" fill="#D9D9D9"/>
+  </g>
+  <circle cx="104" cy="104" r="60" fill="#C8201E" stroke="#16348A" stroke-width="9"/>
+  <text x="104" y="88" text-anchor="middle" font-family="Oswald,'Arial Narrow',sans-serif" font-weight="600" font-size="26" fill="#fff">No</text>
+  <text x="104" y="138" text-anchor="middle" font-family="Oswald,'Arial Narrow',sans-serif" font-weight="600" font-size="54" fill="#fff">1</text>
+</svg></template>
+  <div id="datalists"></div>
+
+  <?!= include('App'); ?>
+</body>
+</html>

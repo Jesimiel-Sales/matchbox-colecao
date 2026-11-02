@@ -1,0 +1,1726 @@
+<script>
+function erroSplash(msg) {
+  var s = document.getElementById('splash'); if (!s) return;
+  s.style.display = 'grid';
+  var p = s.querySelector('p'); p.style.textTransform = 'none'; p.style.letterSpacing = '0'; p.style.maxWidth = '90vw'; p.textContent = msg;
+}
+window.addEventListener('error', function (e) { erroSplash('Erro de JavaScript: ' + e.message + (e.lineno ? ' (linha ' + e.lineno + ')' : '')); });
+(function () {
+'use strict';
+
+/* ================================================================ estado e utilidades */
+const DESCR = ['tipo', 'cor', 'base', 'interior', 'vidro', 'roda', 'outros', 'adesivo', 'ano'];
+const PREVER = ['num', 'nome', 'tipo', 'man', 'cor', 'base', 'interior', 'vidro', 'roda', 'outros', 'adesivo', 'ano', 'proced', 'cotacao'];
+const S = { schema: null, items: {}, aba: 'Lesney', q: '', filtro: null, limite: 150, atual: null, refCache: {}, editando: null, pilha: [], vista: 'grade', ia: null, fotoPendente: null, mack: null, procura: null, prAba: 'faltam', prSo: true, prQ: '', prLim: 40 };
+try { S.vista = localStorage.getItem('mbx_vista') || 'grade'; } catch (e) { /* sem armazenamento */ }
+S.realce = true; S.centralizar = true;
+try { S.realce = localStorage.getItem('mbx_realce') !== '0'; S.centralizar = localStorage.getItem('mbx_centralizar') !== '0'; } catch (e) { /* sem armazenamento */ }
+const $ = s => document.querySelector(s);
+const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const norm = s => String(s == null ? '' : s).normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().trim();
+const codeNorm = s => String(s || '').toUpperCase().replace(/\s+/g, '').replace(/\?/g, '').replace(/^0+(?=\d)/, '');
+const fmtNum = n => Number(n).toLocaleString('pt-BR', { maximumFractionDigits: 2 });
+const fmtData = s => { const m = String(s || '').match(/^(\d{4})-(\d{2})-(\d{2})/); return m ? m[3] + '/' + m[2] + '/' + m[1] : (s || ''); };
+
+function api(fn) {
+  const args = Array.prototype.slice.call(arguments, 1);
+  return new Promise((res, rej) => {
+    const r = google.script.run.withSuccessHandler(res).withFailureHandler(e => rej(e && e.message ? e : new Error(String(e))));
+    r[fn].apply(r, args);
+  });
+}
+function apiJ() { return api.apply(null, arguments).then(r => typeof r === 'string' ? JSON.parse(r) : r); }
+function toast(msg, erro) {
+  const t = $('#toast'); t.textContent = msg; t.className = 'toast on' + (erro ? ' erro' : '');
+  clearTimeout(toast._t); toast._t = setTimeout(() => t.className = 'toast', erro ? 5000 : 2600);
+}
+function parseCode(s) {
+  const m = String(s || '').trim().match(/^0*(\d{1,3})\s*([A-Za-z])\s*(\d+)?/);
+  return m ? { n: +m[1], l: m[2].toUpperCase(), v: m[3] ? +m[3] : null } : null;
+}
+function formatCode(aba, n, l, v) {
+  const num = aba === 'Lesney' ? String(n).padStart(2, '0') : String(n);
+  return num + l + (v != null ? v : '');
+}
+/* Código Charlie Mack do item: na Lesney é a coluna "Cl. Mack detalhada" (mack2); a "Cl." (mack) é a classificação antiga da planilha.
+   Na Superfast só existe mack. Tudo (modelo, variação, conferência, lista de procura) usa este código. */
+function cmTxt(it) { return it.mack2 || it.mack || ''; }
+function cm(it) { return parseCode(it.mack2) || parseCode(it.mack); }
+function modelKey(it) { const p = cm(it); return p ? p.n + p.l : null; }
+function varKey(aba, it) { return codeNorm(aba === 'Lesney' ? (it.mack2 || it.mack) : it.mack); }
+function label(key) { const sc = S.schema[S.aba]; const i = sc.keys.indexOf(key); return i >= 0 ? sc.labels[i] : key; }
+function driveThumb(id, w) { return 'https://drive.google.com/thumbnail?id=' + encodeURIComponent(id) + '&sz=w' + (w || 400); }
+function fotosMarco(it) { return String(it.fotos || '').split(';').filter(Boolean); }
+function temFotoRef(it) { return it.fotoRef && it.fotoRef !== 'nenhuma'; }
+/* "Foto ref." pode ser uma URL de origem ou drive:<id>|<url de origem> (copiada para o banco de imagens) */
+function refInfo(v) {
+  v = String(v || ''); const varia = /^var:/.test(v); v = v.replace(/^var:/, '');
+  const m = v.match(/^drive:([^|]+)\|?(.*)$/);
+  return m ? { id: m[1], url: m[2], varia: varia } : { id: null, url: v, varia: varia };
+}
+/* foto "da variação" = foto do Marco ou foto de referência que ele confirmou ser desta variação */
+function fotoDaVariacao(it) { return fotosMarco(it).length > 0 || (temFotoRef(it) && refInfo(it.fotoRef).varia); }
+function precisaVar(it) { return !fotoDaVariacao(it); }
+function precisaMarco(it) { return !fotosMarco(it).length; }
+let logoSeq = 0;
+function logoSvg() {
+  const n = ++logoSeq;
+  return document.getElementById('tplLogo').innerHTML.replace(/cxLogo/g, 'cxL' + n);
+}
+/* foto padrão do modelo: a própria referência, ou a de outro exemplar do mesmo modelo */
+function indiceModelos(aba) {
+  const m = {};
+  S.items[aba].forEach(x => {
+    if (!x._m) return;
+    const o = m[x._m] || (m[x._m] = {});
+    const fm = fotosMarco(x);
+    if (fm.length && !o.marco) o.marco = { id: fm[0], de: x.id };
+    if (temFotoRef(x) && !o.ref) o.ref = { v: x.fotoRef, de: x.id };
+  });
+  S.idxModelo = m; S.idxAba = aba;
+}
+/* "Foto principal" (coluna AD): "<id da foto do Marco ou ref>|x,y,largura,altura" — recorte quadrado da miniatura, em frações */
+function capaInfo(it) {
+  const v = String(it.capa || ''), i = v.indexOf('|'), k = i >= 0 ? v.slice(0, i) : v;
+  const c = (i >= 0 ? v.slice(i + 1) : '').split(',').map(Number);
+  return { k: k, crop: c.length === 4 && c.every(n => isFinite(n) && n >= 0) && c[2] > 0 && c[3] > 0 ? c : null };
+}
+function principalMarco(it) { const fm = fotosMarco(it), ci = capaInfo(it); return ci.k && fm.indexOf(ci.k) >= 0 ? ci.k : fm[0]; }
+function estiloCrop(crop) {
+  if (!crop) return '';
+  const [x, y, sx, sy] = crop;
+  return 'class="enq" style="width:' + (100 / sx).toFixed(2) + '%;height:' + (100 / sy).toFixed(2) + '%;left:' + (-x / sx * 100).toFixed(2) + '%;top:' + (-y / sy * 100).toFixed(2) + '%"';
+}
+function capa(it, w) {
+  const fm = fotosMarco(it), ci = capaInfo(it);
+  if (ci.k === 'ref' && temFotoRef(it))
+    return { tipo: fm.length || refInfo(it.fotoRef).varia ? 'var' : 'modelo', html: imgTag(refSrc(it.fotoRef, w), 'data-orig="' + esc(refInfo(it.fotoRef).url) + '"') };
+  if (fm.length) {
+    const id = principalMarco(it), crop = ci.k === id ? ci.crop : null;
+    if (ci.k !== id) agendarEnquadre(it, id);
+    return { tipo: 'marco', html: imgTag(driveThumb(id, w * 1.5 | 0), 'data-drive="' + esc(id) + '" ' + estiloCrop(crop)) };
+  }
+  if (temFotoRef(it)) return { tipo: refInfo(it.fotoRef).varia ? 'var' : 'modelo', html: imgTag(refSrc(it.fotoRef, w), 'data-orig="' + esc(refInfo(it.fotoRef).url) + '"') };
+  if (S.idxAba !== S.aba) indiceModelos(S.aba);
+  const o = it._m && S.idxModelo[it._m];
+  if (o && o.marco) return { tipo: 'irmao', html: imgTag(driveThumb(o.marco.id, w * 1.5 | 0), 'data-drive="' + esc(o.marco.id) + '"') };
+  if (o && o.ref) return { tipo: 'irmao', html: imgTag(refSrc(o.ref.v, w), 'data-orig="' + esc(refInfo(o.ref.v).url) + '"') };
+  return { tipo: 'nenhuma', html: '<span class="ph">' + logoSvg() + '</span>' };
+}
+const TARJA_CURTA = { modelo: 'falta foto da variação', irmao: 'foto de outro exemplar', nenhuma: 'sem foto' };
+function bancoUrl(id, w) { return 'https://lh3.googleusercontent.com/d/' + encodeURIComponent(id) + '=w' + (w || 400); }
+function refSrc(v, w) { const r = refInfo(v); return r.id ? bancoUrl(r.id, w) : r.url; }
+
+/* imagens externas: tenta direto; se o site bloquear, busca pelo servidor */
+window.__imgFalhou = function (img) {
+  if (img.dataset.orig && !img.dataset.tentouOrig) { img.dataset.tentouOrig = '1'; img.src = img.dataset.orig; img.dataset.src = img.dataset.orig; return; }
+  if (img.dataset.tentou) return; img.dataset.tentou = '1';
+  const drive = img.dataset.drive, url = img.dataset.src || img.src;
+  const p = drive ? api('getDrivePhoto', drive, 800) : api('getImageData', url);
+  p.then(d => { img.src = d; }).catch(() => { img.replaceWith(Object.assign(document.createElement('span'), { className: 'sem', textContent: '?' })); });
+};
+function imgTag(src, extra) {
+  return '<img loading="lazy" referrerpolicy="no-referrer" src="' + esc(src) + '" data-src="' + esc(src) + '" ' + (extra || '') + ' onerror="__imgFalhou(this)" alt="">';
+}
+
+/* ================================================================ carga */
+function carregar() {
+  return api('getData').then(raw => {
+    const d = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    if (!d || !d.schema) throw new Error('o servidor não devolveu dados. Abra a URL do app com ?diag=1 no final.');
+    S.schema = d.schema;
+    Object.keys(d.sheets).forEach(aba => {
+      const keys = d.schema[aba].keys;
+      S.items[aba] = d.sheets[aba].map(r => { const o = {}; keys.forEach((k, i) => o[k] = r[i]); return prep(o); });
+      $('#qtd' + aba).textContent = '(' + S.items[aba].length + ')';
+    });
+    if (!S.items.Lesney.length && !S.items.Superfast.length) throw new Error('nenhum item encontrado (coluna Y sem IDs). Confira se a planilha é a Matchbox_Colecao_Marco.');
+  });
+}
+function prep(o) {
+  o._h = norm([o.nome, o.mack, o.mack2, o.man, o.cor, o.base, o.interior, o.vidro, o.roda, o.outros, o.adesivo, o.ano, o.vendedor, o.num, o.tipo, o.obs].join(' '));
+  o._m = modelKey(o);
+  const p = cm(o); o._ord = p ? [p.n, p.l, p.v == null ? 0 : p.v] : [Number(o.num) || 999, '~', 0];
+  return o;
+}
+
+/* ================================================================ lista */
+/* ================================================================ busca em português (com sinônimos e inglês) */
+const SINONIMOS = [
+  ['verde', 'green'], ['vermelho', 'vermelha', 'verm', 'red'], ['amarelo', 'amarela', 'yellow'], ['azul', 'blue'], ['laranja', 'orange'],
+  ['branco', 'branca', 'white'], ['preto', 'preta', 'black'], ['cinza', 'cinzento', 'grey', 'gray'], ['prata', 'prateado', 'prateada', 'silver'],
+  ['dourado', 'dourada', 'ouro', 'gold'], ['marrom', 'castanho', 'brown'], ['bege', 'caramelo', 'beige', 'tan'], ['creme', 'marfim', 'cream', 'ivory'],
+  ['rosa', 'pink'], ['roxo', 'roxa', 'lilas', 'purple', 'lilac'], ['turquesa', 'turquoise'], ['oliva', 'olive'], ['vinho', 'bordo', 'maroon'],
+  ['ambar', 'amber'], ['limao', 'lemon'], ['escuro', 'escura', 'esc', 'dark'], ['claro', 'clara', 'cl', 'light', 'pale'],
+  ['metal', 'met', 'metalica', 'metalico', 'metallic'], ['plastico', 'plastica', 'pl', 'plastic'], ['cromado', 'cromada', 'cromo', 'chrome'],
+  ['transparente', 'transpar', 'clear'], ['roda', 'rodas', 'wheel', 'wheels'], ['raiada', 'raiadas', 'spoke', 'spoked'], ['esteira', 'esteiras', 'tracks', 'treads'],
+  ['caminhao', 'truck', 'lorry'], ['onibus', 'bus', 'coach'], ['trator', 'tractor'], ['carro', 'sedan', 'saloon', 'car'], ['ambulancia', 'ambulance'],
+  ['bombeiro', 'bombeiros', 'fire'], ['policia', 'police'], ['guindaste', 'crane'], ['escavadeira', 'excavator', 'shovel'], ['betoneira', 'mixer', 'cement'],
+  ['cacamba', 'basculante', 'tipper', 'dumper', 'dump'], ['reboque', 'carreta', 'trailer'], ['tanque', 'tanker'], ['jipe', 'jeep'], ['moto', 'motocicleta', 'motorcycle'],
+  ['furgao', 'van'], ['rolo', 'roller'], ['taxi', 'cab'], ['caixa', 'box'], ['decalque', 'decal', 'decals'], ['adesivo', 'etiqueta', 'label', 'sticker'],
+  ['capota', 'canopy'], ['motorista', 'driver'], ['escada', 'ladder'], ['base', 'baseplate'], ['vidro', 'vidros', 'janela', 'windows', 'glass'],
+  ['bombeiro', 'bombeiros', 'fire', 'engine'], ['guincho', 'reboque', 'wreck', 'wreck truck', 'breakdown', 'tow'], ['lixo', 'refuse', 'garbage'],
+  ['caminhonete', 'picape', 'pick-up', 'pickup'], ['perua', 'station', 'estate', 'wagon'], ['empilhadeira', 'fork', 'forklift'],
+  ['trailer', 'caravana', 'caravan'], ['barco', 'lancha', 'boat', 'cruiser'], ['carruagem', 'diligencia', 'coach', 'stagecoach'], ['limusine', 'limousine'],
+  ['conversivel', 'conversible', 'convertible', 'cabriolet'], ['esportivo', 'sport', 'sports'], ['corrida', 'racing', 'racer', 'dragster'],
+  ['leite', 'milk', 'dairy'], ['gasolina', 'combustivel', 'petrol', 'tanker', 'fuel'], ['cerveja', 'beer', 'brewery'], ['correio', 'mail', 'post'],
+  ['exercito', 'militar', 'army', 'military'], ['transporte', 'transporter', 'carrier'], ['gado', 'boi', 'cattle'], ['cavalo', 'cavalos', 'horse'],
+  ['madeira', 'tora', 'toras', 'timber', 'log', 'logs'], ['pedra', 'cascalho', 'gravel', 'quarry'], ['areia', 'sand'], ['agua', 'water'],
+  ['sorvete', 'ice cream'], ['fazenda', 'farm'], ['trem', 'train', 'loco'], ['aviao', 'plane', 'aircraft'], ['carreta', 'semi', 'articulated'],
+  ['motoniveladora', 'grader'], ['trator de esteira', 'bulldozer', 'dozer'], ['tanque de guerra', 'tank'], ['rolo compressor', 'road roller']
+].map(g => g.map(norm));
+function alternativas(t) {
+  const out = new Set([t]);
+  SINONIMOS.forEach(g => { if (g.some(w => w === t || (t.length >= 4 && w.indexOf(t) === 0))) g.forEach(w => out.add(w)); });
+  return Array.from(out);
+}
+const escRe = w => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+/* prepara a busca: cada palavra digitada vira uma lista de alternativas (português, abreviações e inglês) */
+const PARADAS = new Set(['de', 'da', 'do', 'das', 'dos', 'e', 'a', 'o', 'as', 'os', 'com', 'sem', 'em', 'no', 'na', 'para', 'um', 'uma', 'the', 'of', 'and']);
+const FRASES = [[/\b(carro|caminhao|carros|caminhoes) de bombeiros?\b/g, 'bombeiro'], [/\bcaminhao (de )?(leite|lixo|cerveja|gasolina|combustivel|areia|madeira|gado|cavalos?)\b/g, '$2'],
+  [/\bonibus (de )?dois andares\b/g, 'onibus'], [/\bdois andares\b/g, 'onibus'], [/\bcarro (de )?corrida\b/g, 'racing'], [/\bcarro (de )?policia\b/g, 'police'],
+  [/\bcaminhao (de )?reboque\b/g, 'guincho'], [/\bcaminhao (de )?mudanca\b/g, 'removal'], [/\bcaminhao (do )?exercito\b/g, 'army'], [/\bcaminhao basculante\b/g, 'tipper']];
+function prepararBusca(q) {
+  let n = norm(q); FRASES.forEach(f => { n = n.replace(f[0], f[1]); });
+  return n.split(/[\s,;]+/).filter(t => t && !PARADAS.has(t)).map(t => ({
+    // o que foi digitado casa como começo de palavra; traduções e sinônimos só como palavra inteira (com plural),
+    // para "fire" (bombeiro) não pegar "Firebird"
+    t: t, alts: alternativas(t).map(w => w === t ? { w: w } : { w: w, re: new RegExp('(^|[^a-z0-9])' + escRe(w) + '(s|es)?($|[^a-z])') })
+  }));
+}
+function acertos(h, termos) { return termos.filter(x => x.alts.some(a => a.re ? a.re.test(h) : h.indexOf(a.w) >= 0)).length; }
+/* até 2 palavras: todas precisam bater; com 3 ou mais, aceita uma que não exista (ex.: "carro de bombeiro escada") */
+function casaBusca(h, termos) { return acertos(h, termos) >= (termos.length <= 2 ? termos.length : termos.length - 1); }
+/* tradução aproximada das descrições do Charlie Mack (inglês) para o Marco */
+const EN_PT = {
+  green: 'verde', red: 'vermelho', yellow: 'amarelo', blue: 'azul', orange: 'laranja', white: 'branco', black: 'preto', grey: 'cinza', gray: 'cinza',
+  silver: 'prata', gold: 'dourado', brown: 'marrom', tan: 'caramelo', beige: 'bege', cream: 'creme', pink: 'rosa', purple: 'roxo', lilac: 'lilás',
+  turquoise: 'turquesa', olive: 'oliva', maroon: 'vinho', amber: 'âmbar', lemon: 'limão', khaki: 'cáqui', copper: 'cobre', bronze: 'bronze',
+  dark: 'escuro', light: 'claro', pale: 'claro', bright: 'vivo', metallic: 'metálico', clear: 'transparente', chrome: 'cromado', unpainted: 'sem pintura',
+  body: 'carroceria', cab: 'cabine', roof: 'teto', base: 'base', baseplate: 'base', wheels: 'rodas', wheel: 'roda', windows: 'janelas', window: 'janela',
+  interior: 'interior', canopy: 'capota', tipper: 'caçamba', bed: 'caçamba', tank: 'tanque', boom: 'braço', hook: 'gancho', tow: 'reboque',
+  decal: 'decalque', decals: 'decalques', label: 'adesivo', labels: 'adesivos', driver: 'motorista', seat: 'banco', seats: 'bancos', grille: 'grade',
+  metal: 'metal', plastic: 'plástico', spoked: 'raiadas', spoke: 'raiada', rollers: 'rolos', roller: 'rolo', tracks: 'esteiras', treads: 'esteiras',
+  and: 'e', with: 'com', no: 'sem', without: 'sem', or: 'ou', 'in': 'em', on: 'no', of: 'de', painted: 'pintado',
+  front: 'dianteiro', rear: 'traseiro', small: 'pequeno', large: 'grande', thin: 'fino', thick: 'grosso', smooth: 'liso', crimped: 'frisado',
+  axles: 'eixos', axle: 'eixo', domed: 'abaulado', flat: 'plano', fine: 'fino', coarse: 'grosso', tread: 'banda', knobby: 'cravo', gloss: 'brilhante', matt: 'fosco', matte: 'fosco', mint: 'menta', dump: 'caçamba', luggage: 'bagagem', trim: 'friso', lorry: 'caminhão', truck: 'caminhão'
+};
+const CORES_EN = /^(green|red|yellow|blue|orange|white|black|grey|gray|silver|gold|brown|tan|beige|cream|pink|purple|lilac|turquoise|olive|maroon|amber|lemon|khaki|copper|bronze|unpainted|chrome)$/;
+const MODS_EN = /^(dark|light|pale|bright|metallic|mint|knobby)$/;
+const ABREV_MACK = { mw: 'metal wheels', gpw: 'grey plastic wheels', bpw: 'black plastic wheels', spw: 'silver plastic wheels', kgpw: 'knobby grey plastic wheels', kbpw: 'knobby black plastic wheels' };
+function traduzir(desc) {
+  desc = String(desc || '').replace(/\b(mw|gpw|bpw|spw|kgpw|kbpw)\b/gi, m => ABREV_MACK[m.toLowerCase()]);
+  const partes = String(desc || '').split(/(\s+|[,;.()/])/);
+  const tk = partes.map(p => ({ p: p, w: p.toLowerCase() }));
+  const pal = tk.filter(x => /^[a-z]+$/i.test(x.p));
+  if (!pal.length || !pal.some(x => EN_PT[x.w])) return '';
+  // "dark green body" -> "carroceria verde escuro"
+  for (let i = 0; i < pal.length; i++) {
+    if (MODS_EN.test(pal[i].w) && pal[i + 1] && CORES_EN.test(pal[i + 1].w)) { const a = pal[i], b = pal[i + 1]; const t = a.p; a.p = b.p; b.p = t; const tw = a.w; a.w = b.w; b.w = tw; i++; }
+  }
+  const MAT = /^(metal|plastic)$/, LIG = /^(and|with|no|or|in|on|of)$/;
+  for (let i = 0; i < pal.length; i++) {
+    let j = i; while (j < pal.length && (CORES_EN.test(pal[j].w) || MODS_EN.test(pal[j].w))) j++;
+    let m = j; if (pal[m] && MAT.test(pal[m].w)) m++;
+    const subst = pal[m];
+    if ((j > i || m > j) && subst && EN_PT[subst.w] && !CORES_EN.test(subst.w) && !MODS_EN.test(subst.w) && !MAT.test(subst.w) && !LIG.test(subst.w)) {
+      const cores = pal.slice(i, j).map(x => EN_PT[x.w] || x.p), mat = m > j ? 'de ' + EN_PT[pal[j].w] : null;
+      const novo = [EN_PT[subst.w]].concat(mat ? [mat] : [], cores);
+      for (let k = i; k <= m; k++) { pal[k].p = novo[k - i]; pal[k].w = '\u0000'; }
+      i = m;
+    }
+  }
+  return tk.map(x => x.w === '\u0000' ? x.p : (/^[a-z]+$/i.test(x.p) ? (EN_PT[x.p.toLowerCase()] || x.p) : x.p)).join('').replace(/\s+/g, ' ').trim();
+}
+
+const ICO_CAM = '<svg viewBox="0 0 24 24"><path fill="currentColor" d="M9 3 7.2 5H4a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-3.2L15 3H9zm3 5a5 5 0 1 1 0 10 5 5 0 0 1 0-10zm0 2a3 3 0 1 0 0 6 3 3 0 0 0 0-6z"/></svg>';
+const ICO_GRADE = '<svg viewBox="0 0 24 24"><path fill="currentColor" d="M3 3h5v5H3zm6.5 0h5v5h-5zM16 3h5v5h-5zM3 9.5h5v5H3zm6.5 0h5v5h-5zm6.5 0h5v5h-5zM3 16h5v5H3zm6.5 0h5v5h-5zm6.5 0h5v5h-5z"/></svg>';
+const ICO_ESTRELA = '<svg viewBox="0 0 24 24"><path fill="currentColor" d="M12 2.5l2.9 6.1 6.6.8-4.9 4.6 1.3 6.6L12 17.3l-5.9 3.3 1.3-6.6-4.9-4.6 6.6-.8z"/></svg>';
+const FILTROS = [
+  { id: null, t: 'Todas', g: ICO_GRADE },
+  { id: 'precisaVar', t: 'Precisa foto da variação', g: ICO_CAM, alerta: true, teste: precisaVar },
+  { id: 'precisaMarco', t: 'Precisa foto do Marco', g: ICO_CAM + '', alerta: true, teste: precisaMarco },
+  { id: 'recentes', t: 'Aquisições recentes', g: 'NOVO', teste: it => !!it.dataAq },
+  { id: 'foto', t: 'Com foto minha', g: 'MINHA', teste: it => fotosMarco(it).length > 0 },
+  { id: 'M', t: 'Mint (M)', g: 'M', teste: it => String(it.cons).toUpperCase() === 'M' },
+  { id: 'C9', t: 'C9', g: 'C9', teste: it => String(it.cons).toUpperCase() === 'C9' },
+  { id: 'C8', t: 'C8', g: 'C8', teste: it => String(it.cons).toUpperCase() === 'C8' },
+  { id: 'C7-', t: 'C7 ou menos', g: 'C7-', teste: it => /^C[1-7]$/i.test(it.cons) },
+  { id: 'semref', t: 'Sem foto de referência', g: '?', teste: it => !temFotoRef(it) }
+];
+function renderFiltros() {
+  const itens = S.items[S.aba] || [];
+  const nProc = S.procura ? S.procura.length : null;
+  const bolhaProc = '<button class="hl" data-procura="1"><span class="bola">' + ICO_ESTRELA + (nProc != null ? '<span class="n">' + nProc + '</span>' : '') +
+    '</span><small>Lista de procura</small></button>';
+  $('#filtros').innerHTML = FILTROS.map((f, i) => (i === 1 ? bolhaProc : '') + (() => {
+    const n = f.teste ? itens.filter(f.teste).length : itens.length;
+    return '<button class="hl' + (S.filtro === f.id ? ' on' : '') + (f.alerta && n ? ' alerta' : '') + '" data-f="' + (f.id || '') + '"><span class="bola">' + f.g +
+      '<span class="n">' + n + '</span></span><small>' + f.t + '</small></button>';
+  })()).join('');
+}
+function filtrados() {
+  const termos = prepararBusca(S.q);
+  S.buscaAlts = termos.map(x => x.alts.map(a => a.w).filter(w => w !== x.t)).reduce((a, b) => a.concat(b), []);
+  let arr = termos.length ? S.items[S.aba].filter(it => casaBusca(it._h, termos)) : S.items[S.aba].slice();
+  S.buscaAprox = false;
+  if (!arr.length && termos.length === 2) { // nada com as duas palavras: mostra o que tem pelo menos uma
+    arr = S.items[S.aba].filter(it => acertos(it._h, termos) >= 1); S.buscaAprox = arr.length > 0;
+  }
+  const f = FILTROS.find(x => x.id === S.filtro);
+  if (f && f.teste) arr = arr.filter(f.teste);
+  if (S.filtro === 'recentes') arr = arr.sort((a, b) => String(b.dataAq).localeCompare(String(a.dataAq)));
+  return arr;
+}
+function renderPerfil() {
+  const todos = S.items[S.aba] || [];
+  $('#stItens').textContent = todos.length.toLocaleString('pt-BR');
+  $('#stModelos').textContent = new Set(todos.map(it => it._m || it.nome)).size.toLocaleString('pt-BR');
+  $('#stFotos').textContent = todos.filter(it => fotosMarco(it).length).length.toLocaleString('pt-BR');
+  $('#bioSerie').textContent = 'Coleção Matchbox · ' + (S.aba === 'Lesney' ? 'Lesney 1-75 (rodas regulares)' : 'Superfast 1-75');
+  $('#bioValor').textContent = todos.filter(precisaVar).length + ' sem foto da variação · valores no menu';
+  renderFiltros();
+}
+function renderLista() {
+  let arr = filtrados(); const lista = $('#lista');
+  indiceModelos(S.aba); renderPerfil();
+  lista.classList.toggle('grade', S.vista === 'grade');
+  document.querySelectorAll('#vistas button').forEach(b => b.classList.toggle('on', b.dataset.vista === S.vista));
+  const modelos = new Set(arr.map(it => it._m || it.nome)).size;
+  const filtro = FILTROS.find(x => x.id === S.filtro);
+  $('#resumo').textContent = (filtro && filtro.id ? filtro.t + ': ' : '') + arr.length + ' miniaturas · ' + modelos + ' modelos' +
+    (S.buscaAprox ? ' · nenhuma com todas as palavras, mostrando as parecidas' : '') +
+    (S.q && S.buscaAlts.length ? ' · buscando também: ' + S.buscaAlts.slice(0, 6).join(', ') : '');
+  if (!arr.length) { lista.innerHTML = '<div class="vazio">Nada encontrado.<br>Toque em + para cadastrar.</div>'; return; }
+  let html = '', grupo = null;
+  const porData = S.filtro === 'recentes';
+  if (!porData) arr = arr.slice().sort(ordemMack);
+  arr.slice(0, S.limite).forEach(it => {
+    const g = porData ? fmtData(it.dataAq) : (it._m || 'sem-' + it.num);
+    if (g !== grupo || html === '') {
+      grupo = g;
+      html += porData ? '<div class="grupo"><span class="no">' + esc(g) + '</span></div>' : cabecalhoModelo(it);
+    }
+    html += S.vista === 'grade' ? tileHtml(it) : cardHtml(it);
+  });
+  if (arr.length > S.limite) html += '<button class="mais" id="maisBtn">Mostrar mais (' + (arr.length - S.limite) + ')</button>';
+  lista.innerHTML = html;
+}
+function ordemMack(a, b) {
+  const x = a._ord, y = b._ord;
+  return (x[0] - y[0]) || String(x[1]).localeCompare(String(y[1])) || (x[2] - y[2]);
+}
+/* nome do modelo: lista do Charlie Mack (Lesney) ou o nome mais usado nos exemplares do mesmo modelo */
+function nomeModelo(it) {
+  const mk = it._m, mack = S.aba === 'Lesney' && S.mack && mk ? S.mack[mk] : null;
+  if (mack) return { nome: tituloCaso(mack.n), ano: mack.a, fonte: 'Charlie Mack' };
+  S.nomesCache = S.nomesCache || {};
+  const ch = S.aba + ':' + mk;
+  if (!S.nomesCache[ch]) {
+    const ir = mk ? S.items[S.aba].filter(x => x._m === mk) : [it];
+    const anos = ir.map(x => Number(x.ano)).filter(Boolean);
+    S.nomesCache[ch] = { nome: frequencias(ir, 'nome')[0] || it.nome, ano: anos.length ? Math.min.apply(null, anos) : '' };
+  }
+  return S.nomesCache[ch];
+}
+function cabecalhoModelo(it) {
+  const p = cm(it), m = nomeModelo(it), qtd = it._m ? S.items[S.aba].filter(x => x._m === it._m).length : 1;
+  const cod = p ? formatCode(S.aba, p.n, p.l) : '';
+  return '<div class="grupo"><span class="no">No. ' + esc(p ? p.n : it.num) + '</span><span class="nm"><b>' + esc(cod) + '</b> ' + esc(m.nome) +
+    (m.ano ? ' <small>(' + esc(m.ano) + ')</small>' : '') + '</span><span class="qt">' + qtd + '</span></div>';
+}
+function tileHtml(it) {
+  const c = capa(it, 240);
+  const cod = cmTxt(it);
+  return '<button class="tile card-t" data-id="' + esc(it.id) + '" aria-label="' + esc(it.nome + ' ' + cod) + '">' + c.html +
+    '<span class="cod-t">' + esc(cod) + '</span>' + (it.cons ? '<span class="cons-t">' + esc(it.cons) + '</span>' : '') +
+    (c.tipo === 'marco' ? '<span class="minha" title="foto do Marco">' + ICO_CAM + '</span>' : '') +
+    (TARJA_CURTA[c.tipo] ? '<span class="tarja' + (c.tipo === 'nenhuma' ? '' : ' modelo') + '">' + TARJA_CURTA[c.tipo] + '</span>' : '') + '</button>';
+}
+function cardHtml(it) {
+  const c = capa(it, 160);
+  const th = c.html + (TARJA_CURTA[c.tipo] ? '<span class="tarja">' + (c.tipo === 'nenhuma' ? 'sem foto' : 'falta variação') + '</span>' : '');
+  const cod = S.aba === 'Lesney' ? (it.mack2 || it.mack) : it.mack;
+  const sub = [it.cor, it.roda, it.ano].filter(Boolean).join(' · ');
+  return '<button class="card" data-id="' + esc(it.id) + '"><div class="thumb">' + th + '</div><div class="meio">' +
+    '<div class="nome">' + esc(it.nome) + '</div><div class="sub"><span class="cod">' + esc(cod) + '</span> ' + esc(sub) + '</div></div>' +
+    (it.cons ? '<span class="cons ' + esc(it.cons) + '">' + esc(it.cons) + '</span>' : '') + '</button>';
+}
+
+/* ================================================================ detalhe */
+function manuaisDe(it) { return new Set(String(it.manuais || '').split(';').filter(Boolean)); }
+function porId(id) { return S.items[S.aba].find(x => x.id === id); }
+function irmaos(it) { return it._m ? S.items[S.aba].filter(x => x._m === it._m && x.id !== it.id) : []; }
+
+function distintivos(it) {
+  const ir = irmaos(it), out = {};
+  if (!ir.length) return out;
+  DESCR.forEach(k => {
+    const mine = String(it[k] || '');
+    const outros = Array.from(new Set(ir.map(x => String(x[k] || '')).filter(v => v !== mine)));
+    if (outros.length) out[k] = outros.map(v => v || '(vazio)').slice(0, 3);
+  });
+  return out;
+}
+
+function abrirDetalhe(id, aba) {
+  if (aba && aba !== S.aba) trocarAba(aba);
+  const it = porId(id); if (!it) return;
+  S.atual = it; S.selFoto = 0;
+  $('#dTitulo').textContent = it.nome;
+  renderDetalhe();
+  abrir('#pDetalhe');
+  carregarRef(it);
+  carregarBamca(it);
+}
+
+function listaFotos(it) {
+  const fotos = fotosMarco(it).map(id => ({ tipo: 'marco', id: id, src: driveThumb(id, 1200), legenda: 'Foto da coleção' }));
+  const ref = S.refCache[it.id];
+  const esc0 = refInfo(it.fotoRef);
+  if (ref && ref.fotos && ref.fotos.length) ref.fotos.forEach(f => fotos.push(Object.assign({ tipo: 'ref' }, f,
+    { src: f.drive ? bancoUrl(f.drive, 1000) : (esc0.id && f.url === esc0.url ? bancoUrl(esc0.id, 1000) : f.url), orig: f.url })));
+  if (temFotoRef(it) && !fotos.some(f => f.tipo === 'ref' && f.url === esc0.url)) fotos.push({ tipo: 'ref', src: refSrc(it.fotoRef, 1000), orig: esc0.url, url: esc0.url, legenda: '', fonte: 'Referência salva' });
+  // a foto de referência escolhida vem antes das demais de referência
+  const iRef = fotos.findIndex(f => f.tipo === 'ref' && f.url === esc0.url);
+  const iPrim = fotos.findIndex(f => f.tipo === 'ref');
+  if (iRef > iPrim && iPrim >= 0) fotos.splice(iPrim, 0, fotos.splice(iRef, 1)[0]);
+  // a foto principal escolhida vem primeiro
+  const ci = capaInfo(it);
+  const iP = ci.k === 'ref' ? fotos.findIndex(f => f.tipo === 'ref' && f.url === esc0.url) : fotos.findIndex(f => f.tipo === 'marco' && f.id === principalMarco(it));
+  if (iP > 0) fotos.unshift(fotos.splice(iP, 1)[0]);
+  return fotos;
+}
+
+function marcar(txt, palavras) {
+  let h = esc(txt);
+  (palavras || []).forEach(w => {
+    const re = new RegExp('(' + w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ')', 'gi');
+    h = h.replace(re, '<mark>$1</mark>');
+  });
+  return h;
+}
+
+function renderDetalhe() {
+  const it = S.atual, aba = S.aba, sc = S.schema[aba];
+  const fotos = listaFotos(it), sel = fotos[S.selFoto] || fotos[0];
+  const dist = distintivos(it);
+  let h = '<div class="caixa"><div class="caixa-faixa"><span>Matchbox · ' + (aba === 'Lesney' ? 'Lesney 1-75' : 'Superfast') + '</span><span class="no">No. ' + esc(it.num) + '</span></div>';
+  const extra = f => f.tipo === 'marco' ? 'data-drive="' + esc(f.id) + '"' : (f.orig && f.orig !== f.src ? 'data-orig="' + esc(f.orig) + '"' : '');
+  const ehVar = sel && (sel.tipo === 'marco' || (sel.tipo === 'ref' && refInfo(it.fotoRef).varia && sel.url === refInfo(it.fotoRef).url));
+  let principal;
+  if (sel) principal = imgTag(sel.src, extra(sel));
+  else { const c = capa(it, 1000); principal = c.tipo === 'nenhuma' ? '<span class="ph">' + logoSvg() + '</span>' : c.html; }
+  const tarja = ehVar ? '' : '<div class="tarja"><span>' + (sel ? 'Foto padrão do modelo: precisa de foto atualizada da variação' :
+      (fotos.length || capa(it, 100).tipo === 'nenhuma' ? 'Sem foto · precisa de foto da variação' : 'Foto de outro exemplar do modelo · precisa de foto da variação')) +
+    '</span><div class="bts"><button data-acao="addFoto">Fotografar</button>' + (sel && sel.tipo === 'ref' ? '<button data-acao="marcarVar">Esta foto é da variação</button>' : '') + '</div></div>';
+  h += '<div class="foto-principal">' + principal + tarja + '</div>';
+  if (ehVar && sel.tipo === 'ref') h += '<div class="foto-credito"><span class="ok-var">foto da variação</span> confirmada por você · <a href="#" data-acao="desmarcarVar">desfazer</a></div>';
+  if (sel && sel.tipo === 'ref') {
+    h += '<div class="foto-credito legenda">' + (sel.melhor ? '<b>Mais parecida com esta variação.</b> ' : '') + marcar(sel.legenda || '', sel.marcadas) +
+      (sel.pagina ? '<br>Fonte: <a href="' + esc(sel.pagina) + '" target="_blank" rel="noopener">' + esc(sel.fonte) + '</a>' : '') +
+      (sel.url !== refInfo(it.fotoRef).url || capaInfo(it).k !== 'ref' ? ' · <a href="#" data-acao="usarRef">usar como foto principal</a>' : ' · <b>foto principal</b>') + '</div>';
+  } else if (sel && sel.tipo === 'marco') {
+    const ehPrin = capaInfo(it).k !== 'ref' && principalMarco(it) === sel.id;
+    h += '<div class="foto-credito">Foto da coleção · ' + (ehPrin ? '<b>foto principal</b> · <a href="#" data-acao="enquadrar" data-foto="' + esc(sel.id) + '">ajustar enquadramento da miniatura</a>'
+      : '<a href="#" data-acao="principal" data-foto="' + esc(sel.id) + '">usar como foto principal</a>') +
+      ' · <a href="#" data-acao="refazerFoto" data-foto="' + esc(sel.id) + '">melhorar esta foto</a> · <a href="#" data-acao="removerFoto" data-foto="' + esc(sel.id) + '">remover</a></div>';
+  }
+  h += '<div class="tira">' + fotos.map((f, i) => '<button data-foto-i="' + i + '" class="' + (f === sel ? 'sel' : '') + '">' +
+    imgTag(f.tipo === 'marco' ? driveThumb(f.id, 200) : (f.src.indexOf('lh3.') >= 0 ? f.src.replace(/=w\d+$/, '=w200') : f.src), extra(f)) +
+    (f.tipo === 'marco' ? '<span class="tag">MINHA</span>' : '') + '</button>').join('') +
+    '<button class="add" data-acao="addFoto" aria-label="Adicionar foto">+</button></div>';
+  if (!S.refCache[it.id]) h += '<div class="carregando">Buscando fotos de referência da variação…</div>';
+  h += '</div>';
+
+  const cod = aba === 'Lesney' ? 'Charlie Mack ' + cmTxt(it) + (it.mack && it.mack2 && codeNorm(it.mack) !== codeNorm(it.mack2) ? ' · Cl. ' + it.mack : '')
+    : [it.mack, it.man ? 'MAN ' + it.man : ''].filter(Boolean).join(' · ');
+  h += '<div class="nome-grande">' + esc(it.nome) + (manuaisDe(it).has('nome') ? ' <span class="tag-alt">alterado manualmente</span>' : '') + '</div><div class="linha-cod">' + esc(cod) + (it.tipo ? ' · ' + esc(it.tipo) : '') + '</div>';
+
+  const outros = irmaos(it);
+  if (outros.length) {
+    h += '<div class="secao"><h3>Outros exemplares do modelo ' + esc(it._m) + ' na coleção (' + outros.length + ')</h3><div class="exemplares">' +
+      outros.slice(0, 40).map(x => '<button data-ir="' + esc(x.id) + '"><div class="bola">' + capa(x, 120).html + '</div><small>' +
+        esc(aba === 'Lesney' ? (x.mack2 || x.mack) : x.mack) + (x.cons ? ' · ' + esc(x.cons) : '') + '</small></button>').join('') + '</div></div>';
+  }
+  const dk = Object.keys(dist);
+  if (dk.length) {
+    h += '<div class="destaques"><h3>O que distingue esta variação</h3>' + dk.map(k =>
+      '<span class="dchip"><b>' + esc(label(k)) + ':</b>' + esc(it[k] || '(vazio)') + '<i>nas outras variações deste modelo: ' + esc(dist[k].join(' / ')) + '</i></span>').join('') +
+      '<div class="foto-credito">Comparado com ' + irmaos(it).length + ' outro(s) exemplar(es) do modelo ' + esc(it._m) + ' na coleção.</div></div>';
+  }
+
+  const grupos = [
+    ['Características', ['cor', 'base', 'interior', 'vidro', 'roda', 'outros', 'adesivo', 'ano', 'proced']],
+    ['Aquisição', ['dataAq', 'vendedor', 'valor', 'cotacao', 'caixa', 'cons', 'obs', 'nota']]
+  ];
+  grupos.forEach(g => {
+    const linhas = g[1].filter(k => sc.keys.indexOf(k) >= 0 && it[k] !== '' && it[k] != null).map(k =>
+      '<dt>' + esc(label(k)) + '</dt><dd class="' + (dist[k] ? 'dist' : '') + '">' + esc(k === 'dataAq' ? fmtData(it[k]) : (k === 'valor' ? fmtNum(it[k]) : it[k])) +
+      (manuaisDe(it).has(k) ? ' <span class="tag-alt">alterado manualmente</span>' : '') + '</dd>').join('');
+    if (linhas) h += '<div class="secao"><h3>' + g[0] + '</h3><dl class="campos">' + linhas + '</dl></div>';
+  });
+
+  const ref = S.refCache[it.id];
+  if (ref && ref.variacoes && ref.variacoes.length) {
+    const pc = cm(it), vm = pc && ref.variacoes.find(v => v.v === pc.v);
+    h += vm
+      ? '<div class="aviso info"><b>Confere com Charlie Mack:</b> ' + esc(cmTxt(it)) + ' = variação ' + vm.v + ', "' + esc(vm.desc) + '".' + (traduzir(vm.desc) ? '<br><small>Tradução aproximada: ' + esc(traduzir(vm.desc)) + '</small>' : '') + '</div>'
+      : '<div class="aviso dup"><b>Variação ' + esc(cmTxt(it)) + ' não consta na lista do Charlie Mack</b> (que vai até a variação ' + ref.variacoes.length + '). Pode ser uma variação além da lista publicada ou um código a revisar.</div>';
+  }
+  if (ref && ref.variacoes && ref.variacoes.length) {
+    const tenho = new Set(S.items[aba].filter(x => x._m === it._m).map(x => (cm(x) || {}).v));
+    h += '<div class="secao"><h3>Variações ' + esc(it._m) + ' segundo Charlie Mack</h3><ul class="var-lista">' +
+      ref.variacoes.map(v => {
+        const cod = formatCode(aba, (cm(it) || {}).n, (cm(it) || {}).l, v.v), pt = traduzir(v.desc);
+        return '<li class="' + (v.atual ? 'atual ' : '') + (tenho.has(v.v) ? 'tem' : '') + '"' + (tenho.has(v.v) ? ' data-var="' + v.v + '" role="button"' : '') +
+          '><span class="vn">' + v.v + '.</span><span class="vt">' + esc(pt || v.desc) + (pt ? '<small>' + esc(v.desc) + '</small>' : '') + '</span>' +
+          (!tenho.has(v.v) ? '<button class="estrela' + (naProcura(cod) ? ' on' : '') + '" data-procurar="' + esc(cod) + '" data-desc="' + esc(v.desc) + '">' + (naProcura(cod) ? 'Procurando' : 'Procurar') + '</button>' : '') + '</li>';
+      }).join('') +
+      '</ul><div class="foto-credito">Toque numa variação marcada "na coleção" para abrir o seu exemplar.</div></div>';
+  }
+  h += secaoBamca(it, aba);
+  if (ref && ref.links && ref.links.length) {
+    h += '<div class="secao fontes"><h3>Fontes de referência</h3>' + ref.links.map(l => '<a href="' + esc(l.url) + '" target="_blank" rel="noopener">' + esc(l.titulo) + '</a>').join('') + '</div>';
+  }
+  if (ref && ref.avisos && ref.avisos.length) h += '<div class="foto-credito">' + esc(ref.avisos.join(' ')) + '</div>';
+  h += '<div class="foto-credito">ID ' + esc(it.id) + (it.atualizado ? ' · atualizado em ' + esc(it.atualizado) : '') + '</div>';
+  h += '<div class="acoes"><button class="btn prim" data-acao="compartilhar">Compartilhar</button>' +
+    (listaFotos(it).length >= 2 ? '<button class="btn" data-acao="comparar">Comparar fotos</button>' : '') + '</div>';
+  h += '<div class="acoes"><button class="btn" data-acao="duplicar">Outro exemplar</button><button class="btn perigo" data-acao="excluir">Excluir</button></div>';
+  $('#dConteudo').innerHTML = h;
+}
+
+function carregarRef(it) {
+  if (S.refCache[it.id]) return;
+  apiJ('getReferenceJson', S.aba, { mack: it.mack, mack2: it.mack2, nome: it.nome, cor: it.cor, base: it.base, interior: it.interior,
+    vidro: it.vidro, roda: it.roda, outros: it.outros, adesivo: it.adesivo }).then(ref => {
+    S.refCache[it.id] = ref;
+    const melhor = (ref.fotos || []).find(f => f.drive);
+    if (!refInfo(it.fotoRef).id && melhor) {
+      it.fotoRef = 'drive:' + melhor.drive + '|' + melhor.url;
+      api('setFotoRef', S.aba, it.id, melhor.url, melhor.drive).then(v => { it.fotoRef = v; renderLista(); }).catch(() => {});
+    }
+    if (S.atual === it) renderDetalhe();
+  }).catch(e => {
+    S.refCache[it.id] = { fotos: [], avisos: ['Não foi possível ler a referência agora (' + e.message + ').'] };
+    if (S.atual === it) renderDetalhe();
+  });
+}
+
+/* ================================================================ BAMCA (comparativo de variações) */
+S.bamca = {};
+function chaveBamca(it) { const p = cm(it); return p ? S.aba + '|' + p.n + p.l : ''; }
+function carregarBamca(it) {
+  const k = chaveBamca(it);
+  if (!k || S.bamca[k] !== undefined) return;
+  S.bamca[k] = null;
+  apiJ('getBamca', S.aba, cmTxt(it)).then(r => { S.bamca[k] = r; if (S.atual === it) renderDetalhe(); }).catch(() => { delete S.bamca[k]; });
+}
+/* quantos campos do cadastro batem com a variação do BAMCA (cor, rodas, base, vidros, interior) */
+function notaBamca(it, v) {
+  let n = 0, de = 0;
+  [['cor', 'body'], ['roda', 'wheels'], ['base', 'base'], ['vidro', 'windows'], ['interior', 'interior']].forEach(([a, b]) => {
+    const t = prepararBusca(it[a] || ''); if (!t.length || !v[b]) return;
+    de++; if (casaBusca(norm(v[b] + ' ' + traduzir(v[b])), t)) n++;
+  });
+  return { n: n, de: de };
+}
+function secaoBamca(it, aba) {
+  const r = S.bamca[chaveBamca(it)];
+  if (r === null) return '<div class="secao"><h3>Variações no BAMCA</h3><div class="carregando">Carregando…</div></div>';
+  if (!r || !r.ok) return '';
+  const pc = cm(it), todas = r.v.map((v, i) => Object.assign({}, v, { i: i, sc: notaBamca(it, v) }));
+  const melhor = Math.max.apply(null, todas.map(v => v.sc.n));
+  const ordem = todas.slice().sort((a, b) => b.sc.n - a.sc.n || a.i - b.i);
+  const ver = S.bamcaTudo === r.chave ? ordem : ordem.slice(0, 8);
+  const pt = x => { const t = traduzir(x); return t || x; };
+  return '<div class="secao"><h3>Variações no BAMCA · ' + esc(r.casting) + ' ' + esc(r.modelo) + ' (' + r.v.length + ')</h3>' +
+    '<div class="foto-credito">Comparativo: as mais parecidas com o seu cadastro aparecem primeiro.</div><ul class="var-lista bamca">' +
+    ver.map(v => {
+      const igual = aba === 'Lesney' && pc && pc.v && parseInt(v.var, 10) === pc.v;
+      const parecida = melhor > 0 && v.sc.n === melhor;
+      const tem = x => x && !/^(none|no|n\/a)$/i.test(x);
+      const det = [tem(v.wheels) && 'rodas ' + pt(v.wheels), tem(v.base) && 'base ' + pt(v.base), tem(v.windows) && 'vidros ' + pt(v.windows), tem(v.interior) && 'interior ' + pt(v.interior),
+        tem(v.deco) && 'decoração ' + pt(v.deco), v.fab, v.data].filter(Boolean).join(' · ');
+      return '<li class="' + (parecida || igual ? 'atual' : '') + '"><span class="vn">' + esc(v.var) + '</span><span class="vt"><b>' + esc(pt(v.body)) + '</b>' +
+        (igual ? ' <small>mesmo número da sua variação Mack</small>' : '') + (parecida ? ' <small>parecida com a sua (' + v.sc.n + ' de ' + v.sc.de + ' itens)</small>' : '') +
+        '<small>' + esc(det + (v.obs ? ' · ' + v.obs : '')) + '</small></span></li>';
+    }).join('') + '</ul>' +
+    (r.v.length > 8 ? '<div class="acoes"><button class="btn" data-acao="bamcaTudo" data-chave="' + esc(r.chave) + '">' + (S.bamcaTudo === r.chave ? 'Mostrar só as mais parecidas' : 'Ver todas as ' + r.v.length + ' variações') + '</button></div>' : '') +
+    '<div class="foto-credito">Fonte: BAMCA (bamca.org), cópia de julho de 2026, uso privado autorizado por Dean Dierschow. Os números de variação do BAMCA são próprios e podem não coincidir com os do Charlie Mack.</div></div>';
+}
+
+/* ================================================================ fotos da coleção */
+/* Encontra a miniatura na foto. O fundo é aprendido pelas bordas da imagem (até 5 tons, o que cobre mármore,
+   toalha estampada e sombra); o objeto é o que foge desses tons. Devolve o retângulo ou null se não tiver certeza. */
+function acharObjeto(img) {
+  const W = 180, k = W / Math.max(img.width, img.height), w = Math.max(8, Math.round(img.width * k)), h = Math.max(8, Math.round(img.height * k));
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  const ctx = c.getContext('2d'); ctx.drawImage(img, 0, 0, w, h);
+  const d = ctx.getImageData(0, 0, w, h).data, px = (x, y) => (y * w + x) * 4;
+  const m = Math.max(2, Math.round(Math.min(w, h) * 0.06)), borda = [];
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (x < m || y < m || x >= w - m || y >= h - m) { const i = px(x, y); borda.push([d[i], d[i + 1], d[i + 2]]); }
+  // k-means simples (k=5) nas cores da borda
+  let cent = [0, 1, 2, 3, 4].map(j => borda[Math.floor((j + 0.5) * borda.length / 5)].slice());
+  const dist = (p, q) => Math.abs(p[0] - q[0]) + Math.abs(p[1] - q[1]) + Math.abs(p[2] - q[2]);
+  let rot = new Array(borda.length).fill(0);
+  for (let it = 0; it < 8; it++) {
+    const soma = cent.map(() => [0, 0, 0, 0]);
+    borda.forEach((p, i) => { let b = 0, bd = 1e9; cent.forEach((q, j) => { const dd = dist(p, q); if (dd < bd) { bd = dd; b = j; } }); rot[i] = b; const s = soma[b]; s[0] += p[0]; s[1] += p[1]; s[2] += p[2]; s[3]++; });
+    cent = cent.map((q, j) => soma[j][3] ? [soma[j][0] / soma[j][3], soma[j][1] / soma[j][3], soma[j][2] / soma[j][3]] : q);
+  }
+  const cont = cent.map((q, j) => rot.filter(r => r === j).length);
+  const fundo = cent.filter((q, j) => cont[j] >= borda.length * 0.08);
+  const dmin = p => Math.min.apply(null, fundo.map(q => dist(p, q)));
+  const dsB = borda.map(dmin).sort((a, b) => a - b);
+  const lim = Math.max(30, dsB[Math.floor(dsB.length * 0.95)] * 1.4);
+  const lin = new Array(h).fill(0), col = new Array(w).fill(0); let total = 0;
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const i = px(x, y);
+    if (dmin([d[i], d[i + 1], d[i + 2]]) > lim) { lin[y]++; col[x]++; total++; }
+  }
+  const corte = (arr, n) => { const t = Math.max(1, n * 0.06); let a = 0, b = arr.length - 1; while (a < b && arr[a] < t) a++; while (b > a && arr[b] < t) b--; return [a, b]; };
+  const [y0, y1] = corte(lin, w), [x0, x1] = corte(col, h);
+  const area = (x1 - x0 + 1) * (y1 - y0 + 1) / (w * h);
+  acharObjeto.ultimo = { fundo: fundo, lim: lim };
+  if (total < w * h * 0.01 || area < 0.02 || area > 0.9) return null;
+  return { x: x0 / k, y: y0 / k, w: (x1 - x0 + 1) / k, h: (y1 - y0 + 1) / k };
+}
+function carregarImg(src) {
+  return new Promise((res, rej) => { const im = new Image(); im.onload = () => res(im); im.onerror = () => rej(new Error('imagem não abriu')); im.src = src; });
+}
+/* Reduz a foto (lado maior = max) e, se pedir, centraliza a miniatura com uma margem, em formato 4:3 */
+function reduzirImagem(file, max, centralizar) {
+  const url = URL.createObjectURL(file);
+  return carregarImg(url).then(img => {
+    URL.revokeObjectURL(url);
+    const r = regiao(img, centralizar ? 'auto' : 'inteira', 1, null);
+    const kk = Math.min(1, max / Math.max(r.w, r.h));
+    const c = document.createElement('canvas'); c.width = Math.round(r.w * kk); c.height = Math.round(r.h * kk);
+    c.getContext('2d').drawImage(img, r.x, r.y, r.w, r.h, 0, 0, c.width, c.height);
+    return c.toDataURL('image/jpeg', 0.85);
+  });
+}
+/* Retângulo 4:3 a recortar: automático (acha o carrinho), foto inteira, ou centro escolhido com o dedo; zoom > 1 aproxima */
+function regiao(img, modo, zoom, centro) {
+  const W = img.width, H = img.height;
+  if (modo === 'inteira' && zoom <= 1 && !centro) return { x: 0, y: 0, w: W, h: H };
+  let cw, ch, cx = W / 2, cy = H / 2;
+  const obj = modo === 'auto' ? (() => { try { return acharObjeto(img); } catch (e) { return null; } })() : null;
+  if (obj) { cw = obj.w * 1.36; ch = obj.h * 1.36; cx = obj.x + obj.w / 2; cy = obj.y + obj.h / 2; }
+  else { cw = W; ch = H; }
+  if (cw / ch > 4 / 3) ch = cw * 3 / 4; else cw = ch * 4 / 3;
+  cw /= zoom; ch /= zoom;
+  if (cw > W) { ch *= W / cw; cw = W; } if (ch > H) { cw *= H / ch; ch = H; }
+  if (centro) { cx = centro[0] * W; cy = centro[1] * H; }
+  return { x: Math.min(Math.max(0, cx - cw / 2), W - cw), y: Math.min(Math.max(0, cy - ch / 2), H - ch), w: cw, h: ch };
+}
+
+/* ---------- filtros para melhorar a foto */
+function filtrar(ctx, w, h, f) {
+  if (f === 'orig') return;
+  const im = ctx.getImageData(0, 0, w, h), d = im.data, n = w * h;
+  const niveis = () => { // estica cada canal entre 1% e 99%: corrige foto escura, apagada ou amarelada
+    for (let ch = 0; ch < 3; ch++) {
+      const hist = new Uint32Array(256); for (let i = ch; i < d.length; i += 4) hist[d[i]]++;
+      let a = 0, b = 255, s = 0; while (a < 255 && (s += hist[a]) < n * 0.01) a++; s = 0; while (b > 0 && (s += hist[b]) < n * 0.01) b--;
+      if (b - a < 20) continue;
+      const lut = new Uint8ClampedArray(256); for (let v = 0; v < 256; v++) lut[v] = (v - a) * 255 / (b - a);
+      for (let i = ch; i < d.length; i += 4) d[i] = lut[d[i]];
+    }
+  };
+  if (f === 'auto' || f === 'nitido') niveis();
+  if (f === 'claro') { const lut = new Uint8ClampedArray(256); for (let v = 0; v < 256; v++) lut[v] = 255 * Math.pow(v / 255, 0.72) + 6; for (let i = 0; i < d.length; i++) if ((i & 3) !== 3) d[i] = lut[d[i]]; }
+  if (f === 'vivas') {
+    niveis();
+    for (let i = 0; i < d.length; i += 4) {
+      const l = 0.3 * d[i] + 0.59 * d[i + 1] + 0.11 * d[i + 2];
+      for (let j = 0; j < 3; j++) d[i + j] = l + (d[i + j] - l) * 1.4 + (d[i + j] - 128) * 0.08;
+    }
+  }
+  if (f === 'nitido') {
+    const o = new Uint8ClampedArray(d);
+    for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
+      const i = (y * w + x) * 4;
+      for (let j = 0; j < 3; j++) d[i + j] = o[i + j] * 1.8 - (o[i + j - 4] + o[i + j + 4] + o[i + j - w * 4] + o[i + j + w * 4]) * 0.2;
+    }
+  }
+  ctx.putImageData(im, 0, 0);
+}
+
+/* ---------- escolher de onde vem a foto */
+function escolherOrigemFoto(modo) {
+  const m = $('#menu'), nav = $('#menuNav');
+  nav.innerHTML = '<h3>' + (modo === 'busca' ? 'Buscar por foto' : 'Adicionar foto') + '</h3>' +
+    '<button data-r="cam">Tirar foto agora</button><button data-r="gal">Escolher da galeria' + (modo === 'busca' ? '' : ' (pode marcar várias)') + '</button><button data-r="0">Cancelar</button>';
+  m.classList.add('aberto');
+  const h = e => {
+    const b = e.target.closest('[data-r]'); if (!b && e.target !== m) return;
+    m.classList.remove('aberto'); m.removeEventListener('click', h);
+    if (!b || b.dataset.r === '0') return;
+    const cam = b.dataset.r === 'cam';
+    $(modo === 'busca' ? (cam ? '#arquivoBuscaCam' : '#arquivoBusca') : (cam ? '#arquivoFoto' : '#arquivoGaleria')).click();
+  };
+  m.addEventListener('click', h);
+}
+['#arquivoFoto', '#arquivoGaleria'].forEach(sel => $(sel).addEventListener('change', e => {
+  const fs = Array.prototype.slice.call(e.target.files || []), it = S.atual; e.target.value = '';
+  if (!fs.length || !it) return;
+  abrirEditor(fs, { it: it, aba: S.aba });
+}));
+
+/* ---------- editor: filtro + enquadramento antes de enviar */
+const FILTROS_ED = [['orig', 'Original'], ['auto', 'Automático'], ['claro', 'Mais claro'], ['vivas', 'Cores vivas'], ['nitido', 'Mais nítido']];
+function abrirEditor(arquivos, ctx) {
+  S.ed = { fila: arquivos.slice(), total: arquivos.length, n: 0, ctx: ctx };
+  abrir('#pEditor'); proximoEditor();
+}
+function proximoEditor() {
+  const E = S.ed; if (!E) return;
+  const f = E.fila.shift();
+  if (!f) { S.ed = null; fechar('#pEditor'); return; }
+  E.n++;
+  $('#edTitulo').textContent = E.total > 1 ? 'Ajustar foto ' + E.n + ' de ' + E.total : 'Ajustar foto';
+  $('#edConteudo').innerHTML = '<div class="carregando">Abrindo a foto…</div>';
+  const url = URL.createObjectURL(f);
+  carregarImg(url).then(img => {
+    E.img = img; E.filtro = 'auto'; E.modo = S.centralizar === false ? 'inteira' : 'auto'; E.zoom = 1; E.centro = null; E.giro = 0;
+    E.base = img; montarEditor(); desenharEditor();
+  }).catch(err => { toast('Não abriu a foto: ' + err.message, true); proximoEditor(); });
+}
+function imgGirada(E) {
+  if (!E.giro) return E.img;
+  const c = document.createElement('canvas'), q = E.giro % 180 !== 0;
+  c.width = q ? E.img.height : E.img.width; c.height = q ? E.img.width : E.img.height;
+  const x = c.getContext('2d'); x.translate(c.width / 2, c.height / 2); x.rotate(E.giro * Math.PI / 180); x.drawImage(E.img, -E.img.width / 2, -E.img.height / 2);
+  return c;
+}
+function renderEditor(E, max) {
+  const src = E.base, r = regiao(src, E.modo, E.zoom, E.centro);
+  const k = Math.min(1, max / Math.max(r.w, r.h));
+  const c = document.createElement('canvas'); c.width = Math.round(r.w * k); c.height = Math.round(r.h * k);
+  const x = c.getContext('2d'); x.drawImage(src, r.x, r.y, r.w, r.h, 0, 0, c.width, c.height);
+  filtrar(x, c.width, c.height, E.filtro);
+  return { canvas: c, r: r };
+}
+function montarEditor() {
+  const E = S.ed, bt = (grp, v, t) => '<button data-ed="' + grp + '" data-v="' + v + '">' + t + '</button>';
+  $('#edConteudo').innerHTML = '<div class="ed-prev" id="edPrev"></div>' +
+    '<div class="ed-dica">Toque na foto para escolher o centro do enquadramento.</div>' +
+    '<div class="ed-grupo">Melhorar a foto</div><div class="ed-ops">' + FILTROS_ED.map(f => bt('filtro', f[0], f[1])).join('') + '</div>' +
+    '<div class="ed-grupo">Enquadramento</div><div class="ed-ops">' + bt('modo', 'auto', 'Centralizar automático') + bt('modo', 'inteira', 'Foto inteira') +
+    bt('zoom', 'mais', 'Aproximar +') + bt('zoom', 'menos', 'Afastar −') + bt('giro', '90', 'Girar') + '</div>' +
+    '<div class="acoes"><button class="btn" data-ed="pular">' + (E.total > 1 ? 'Pular esta' : 'Cancelar') + '</button><button class="btn prim" data-ed="salvar">Salvar foto</button></div>';
+}
+function desenharEditor() {
+  const E = S.ed; if (!E) return;
+  const out = renderEditor(E, 760); E.ult = out;
+  const p = $('#edPrev'); p.innerHTML = ''; p.appendChild(out.canvas);
+  $('#edConteudo').querySelectorAll('[data-ed="filtro"],[data-ed="modo"]').forEach(b => b.classList.toggle('on', E[b.dataset.ed] === b.dataset.v));
+}
+$('#edConteudo').addEventListener('click', e => {
+  const E = S.ed; if (!E) return;
+  const prev = e.target.closest('#edPrev');
+  if (prev && E.ult) { // toque: novo centro
+    const b = prev.getBoundingClientRect(), r = E.ult.r, src = E.base;
+    const fx = (e.clientX - b.left) / b.width, fy = (e.clientY - b.top) / b.height;
+    E.centro = [(r.x + fx * r.w) / src.width, (r.y + fy * r.h) / src.height];
+    if (E.modo === 'inteira' && E.zoom <= 1) E.zoom = 1.5;
+    desenharEditor(); return;
+  }
+  const b = e.target.closest('[data-ed]'); if (!b) return;
+  const g = b.dataset.ed;
+  if (g === 'filtro') E.filtro = b.dataset.v;
+  if (g === 'modo') { E.modo = b.dataset.v; E.zoom = 1; E.centro = null; }
+  if (g === 'zoom') E.zoom = Math.max(1, Math.min(4, E.zoom * (b.dataset.v === 'mais' ? 1.25 : 0.8)));
+  if (g === 'giro') { E.giro = (E.giro + 90) % 360; E.base = imgGirada(E); E.centro = null; }
+  if (g === 'pular') { if (E.total > 1) proximoEditor(); else { S.ed = null; fechar('#pEditor'); } return; }
+  if (g === 'salvar') { salvarEditor(); return; }
+  desenharEditor();
+});
+$('#edSalvar').addEventListener('click', () => salvarEditor());
+$('#edCancelar').addEventListener('click', () => { S.ed = null; fechar('#pEditor'); });
+function salvarEditor() {
+  const E = S.ed; if (!E || E.enviando) return;
+  E.enviando = true;
+  const dados = renderEditor(E, 1600).canvas.toDataURL('image/jpeg', 0.88), c = E.ctx, it = c.it;
+  toast('Enviando foto…');
+  let p = api('uploadPhoto', c.aba, it.id, dados).then(l => { it.fotos = l; });
+  if (c.substituir) {
+    const era = principalMarco(it) === c.substituir && capaInfo(it).k !== 'ref';
+    p = p.then(() => api('removePhoto', c.aba, it.id, c.substituir)).then(l => {
+      it.fotos = l;
+      if (era) { const nova = fotosMarco(it).slice(-1)[0]; it.capa = nova || ''; return api('setCapa', c.aba, it.id, it.capa); }
+    });
+    c.substituir = null;
+  }
+  p.then(() => {
+    toast('Foto salva na coleção'); E.enviando = false; S.selFoto = 0;
+    if (S.atual === it) renderDetalhe(); renderLista(); proximoEditor();
+  }).catch(err => { E.enviando = false; toast('Falha ao enviar a foto: ' + err.message, true); });
+}
+
+/* ---------- enquadramento automático das miniaturas (fotos já tiradas) */
+const ENQ = { fila: [], ativos: 0, feitos: {} };
+function agendarEnquadre(it, id, forcar) {
+  if (!id || (!forcar && ENQ.feitos[id])) return;
+  ENQ.feitos[id] = true;
+  ENQ.fila.push({ it: it, id: id, aba: S.aba });
+  setTimeout(rodarEnquadre, 400);
+}
+function cropQuadrado(img, obj) {
+  const W = img.width, H = img.height;
+  let s = obj ? Math.max(obj.w, obj.h) * 1.3 : Math.min(W, H);
+  s = Math.min(s, W, H);
+  const cx = obj ? obj.x + obj.w / 2 : W / 2, cy = obj ? obj.y + obj.h / 2 : H / 2;
+  const x = Math.min(Math.max(0, cx - s / 2), W - s), y = Math.min(Math.max(0, cy - s / 2), H - s);
+  return [x / W, y / H, s / W, s / H].map(v => Math.round(v * 10000) / 10000);
+}
+function rodarEnquadre() {
+  while (ENQ.ativos < 2 && ENQ.fila.length) {
+    const t = ENQ.fila.shift(); ENQ.ativos++;
+    api('getDrivePhoto', t.id, 800).then(carregarImg).then(img => {
+      let obj = null; try { obj = acharObjeto(img); } catch (e) {}
+      const v = t.id + '|' + (obj ? cropQuadrado(img, obj).join(',') : '');
+      if (capaInfo(t.it).k && capaInfo(t.it).k !== t.id) return; // Marco escolheu outra enquanto isso
+      return api('setCapa', t.aba, t.it.id, v).then(r => { t.it.capa = r; aplicarCrop(t.it, t.id); });
+    }).catch(() => {}).then(() => { ENQ.ativos--; rodarEnquadre(); });
+  }
+}
+function aplicarCrop(it, id) {
+  const crop = capaInfo(it).k === id ? capaInfo(it).crop : null;
+  document.querySelectorAll('#lista [data-id="' + CSS.escape(it.id) + '"] img[data-drive="' + CSS.escape(id) + '"]').forEach(im => {
+    if (crop) { const [x, y, sx, sy] = crop; im.className = 'enq'; im.style.cssText = 'width:' + (100 / sx) + '%;height:' + (100 / sy) + '%;left:' + (-x / sx * 100) + '%;top:' + (-y / sy * 100) + '%'; }
+    else { im.className = ''; im.style.cssText = ''; }
+  });
+}
+
+/* ---------- enquadrar a miniatura à mão */
+function abrirEnquadre(it, id) {
+  const ci = capaInfo(it);
+  S.enq = { it: it, id: id, aba: S.aba, crop: ci.k === id && ci.crop ? ci.crop.slice() : null };
+  $('#enqConteudo').innerHTML = '<div class="carregando">Abrindo a foto…</div>';
+  abrir('#pEnq');
+  api('getDrivePhoto', id, 1000).then(carregarImg).then(img => {
+    const E = S.enq; if (!E) return;
+    E.img = img; if (!E.crop) E.crop = cropQuadrado(img, (() => { try { return acharObjeto(img); } catch (e) { return null; } })());
+    $('#enqConteudo').innerHTML = '<div class="ed-dica" style="margin:0 0 8px">O quadrado amarelo é o que aparece na miniatura. Toque na foto para mudar o centro.</div>' +
+      '<div class="ed-prev" id="enqFoto" style="background:#fff"><img src="' + img.src + '" style="display:block;width:100%" alt="">' +
+      '<div id="enqQuadro" style="position:absolute;border:3px solid #FFD200;box-shadow:0 0 0 2000px rgba(0,0,0,.45);pointer-events:none"></div></div>' +
+      '<div class="ed-ops" style="margin-top:10px"><button data-enq="mais">Aproximar +</button><button data-enq="menos">Afastar −</button><button data-enq="auto">Automático</button><button data-enq="toda">Foto inteira</button></div>' +
+      '<div class="ed-grupo">Como fica</div><div class="tile" id="enqTeste" style="width:140px;aspect-ratio:1;display:block;pointer-events:none"></div>';
+    desenharEnq();
+  }).catch(err => { $('#enqConteudo').innerHTML = '<div class="aviso dup">Não abriu a foto: ' + esc(err.message) + '</div>'; });
+}
+function desenharEnq() {
+  const E = S.enq, [x, y, sx, sy] = E.crop, q = $('#enqQuadro');
+  q.style.left = x * 100 + '%'; q.style.top = y * 100 + '%'; q.style.width = sx * 100 + '%'; q.style.height = sy * 100 + '%';
+  $('#enqTeste').innerHTML = '<img src="' + E.img.src + '" ' + estiloCrop(E.crop) + ' alt="">';
+}
+$('#enqConteudo').addEventListener('click', e => {
+  const E = S.enq; if (!E || !E.img) return;
+  const W = E.img.width, H = E.img.height;
+  let [x, y, sx, sy] = E.crop, cx = (x + sx / 2) * W, cy = (y + sy / 2) * H, s = sx * W;
+  const f = e.target.closest('#enqFoto'), b = e.target.closest('[data-enq]');
+  if (f) { const r = f.getBoundingClientRect(); cx = (e.clientX - r.left) / r.width * W; cy = (e.clientY - r.top) / r.height * H; }
+  else if (b) {
+    const a = b.dataset.enq;
+    if (a === 'auto') { E.crop = cropQuadrado(E.img, (() => { try { return acharObjeto(E.img); } catch (er) { return null; } })()); desenharEnq(); return; }
+    if (a === 'toda') { E.crop = cropQuadrado(E.img, null); desenharEnq(); return; }
+    s *= a === 'mais' ? 0.8 : 1.25;
+  } else return;
+  s = Math.max(Math.min(W, H) * 0.15, Math.min(s, W, H));
+  E.crop = cropQuadrado(E.img, { x: cx - s / 2 / 1.3, y: cy - s / 2 / 1.3, w: s / 1.3, h: s / 1.3 });
+  desenharEnq();
+});
+$('#enqSalvar').addEventListener('click', () => {
+  const E = S.enq; if (!E || !E.crop) return;
+  api('setCapa', E.aba, E.it.id, E.id + '|' + E.crop.join(',')).then(v => {
+    E.it.capa = v; S.enq = null; fechar('#pEnq'); renderLista(); if (S.atual === E.it) renderDetalhe(); toast('Miniatura ajustada');
+  }).catch(err => toast(err.message, true));
+});
+
+/* ---------- prévia ao segurar a foto */
+(function () {
+  let tm = null, alvo = null, x0 = 0, y0 = 0;
+  const lista = $('#lista'), pk = $('#peek');
+  const fim = () => { clearTimeout(tm); tm = null; };
+  lista.addEventListener('contextmenu', e => { if (e.target.closest('.tile,.card')) e.preventDefault(); });
+  lista.addEventListener('pointerdown', e => {
+    const b = e.target.closest('.tile[data-id],.card[data-id]'); if (!b) return;
+    alvo = b; x0 = e.clientX; y0 = e.clientY; fim(); S.peekFez = false;
+    tm = setTimeout(() => { tm = null; mostrarPeek(alvo.dataset.id); S.peekFez = true; if (navigator.vibrate) try { navigator.vibrate(15); } catch (er) {} }, 450);
+  });
+  lista.addEventListener('pointermove', e => { if (tm && Math.abs(e.clientX - x0) + Math.abs(e.clientY - y0) > 12) fim(); });
+  const solta = () => { fim(); if (pk.classList.contains('on')) setTimeout(() => { pk.classList.remove('on'); setTimeout(() => { S.peekFez = false; }, 350); }, 60); };
+  ['pointerup', 'pointercancel'].forEach(t => window.addEventListener(t, solta));
+  pk.addEventListener('click', () => pk.classList.remove('on'));
+  lista.addEventListener('scroll', fim, { passive: true }); window.addEventListener('scroll', fim, { passive: true });
+})();
+function mostrarPeek(id) {
+  const it = porId(id); if (!it) return;
+  const fm = fotosMarco(it), ci = capaInfo(it);
+  const src = ci.k === 'ref' || !fm.length ? (temFotoRef(it) ? refSrc(it.fotoRef, 800) : '') : driveThumb(principalMarco(it), 800);
+  const l1 = [cmTxt(it), it.nome].filter(Boolean).join(' · ');
+  const l2 = 'Cor: ' + (it.cor || '—') + (it.roda ? ' · rodas ' + it.roda : '');
+  const l3 = 'Conservação: ' + (it.cons || '—') + (it.ano ? ' · ano ' + it.ano : '');
+  $('#peek').innerHTML = '<div class="pk"><div class="pk-img">' + (src ? '<img src="' + esc(src) + '" alt="">' : '') + '</div><div class="pk-txt"><b>' + esc(l1) + '</b><span>' + esc(l2) + '</span><span>' + esc(l3) + '</span></div></div>';
+  $('#peek').classList.add('on');
+}
+
+/* ---------- valores da coleção (no menu) */
+function numeros(s) { return (String(s || '').replace(/(\d)\.(\d{3})/g, '$1$2').match(/\d+(?:,\d+|\.\d+)?/g) || []).map(v => Number(v.replace(',', '.'))); }
+function abrirValores() {
+  const linhas = [], todos = [];
+  ['Lesney', 'Superfast'].forEach(aba => (S.items[aba] || []).forEach(it => todos.push({ aba: aba, it: it, v: Number(it.valor) || 0, c: numeros(it.cotacao) })));
+  const soma = a => a.reduce((s, x) => s + x.v, 0);
+  const comV = todos.filter(x => x.v > 0), total = soma(todos);
+  const cMin = todos.reduce((s, x) => s + (x.c.length ? x.c[0] : 0), 0), cMax = todos.reduce((s, x) => s + (x.c.length ? x.c[x.c.length - 1] : 0), 0);
+  let h = '<div class="kpis"><div class="kpi"><b>' + fmtNum(total) + '</b><span>valor pago somado (' + comV.length + ' de ' + todos.length + ' com valor)</span></div>' +
+    '<div class="kpi"><b>' + (comV.length ? 'R$ ' + fmtNum(total / comV.length) : '—') + '</b><span>média por miniatura com valor</span></div>' +
+    '<div class="kpi"><b>' + (cMax ? 'U$ ' + fmtNum(cMin) + (cMax !== cMin ? ' a ' + fmtNum(cMax) : '') : '—') + '</b><span>cotação somada (' + todos.filter(x => x.c.length).length + ' com cotação)</span></div>' +
+    '<div class="kpi"><b>' + (comV.length ? 'R$ ' + fmtNum(Math.max.apply(null, comV.map(x => x.v))) : '—') + '</b><span>maior valor pago</span></div></div>';
+  const tabela = (tit, grupos) => '<div class="secao"><h3>' + tit + '</h3><table class="tab-v"><tr><th></th><th class="n">Qtd.</th><th class="n">Valor pago (R$)</th></tr>' +
+    grupos.map(g => '<tr><td>' + esc(g[0]) + '</td><td class="n">' + g[1].length + '</td><td class="n">' + fmtNum(soma(g[1])) + '</td></tr>').join('') + '</table></div>';
+  const agrupa = (f, ordem) => { const m = {}; todos.forEach(x => { const k = f(x) || '(sem informação)'; (m[k] = m[k] || []).push(x); }); return Object.keys(m).sort(ordem).map(k => [k, m[k]]); };
+  h += tabela('Por série', agrupa(x => x.aba));
+  h += tabela('Por conservação', agrupa(x => String(x.it.cons || '').trim()));
+  h += tabela('Por ano de aquisição', agrupa(x => { const m = String(x.it.dataAq || '').match(/(19|20)\d\d/); return m ? m[0] : ''; }, (a, b) => b.localeCompare(a)));
+  const top = comV.sort((a, b) => b.v - a.v).slice(0, 10);
+  h += '<div class="secao"><h3>As 10 de maior valor pago</h3><table class="tab-v">' + top.map(x => '<tr data-v-item="' + esc(x.it.id) + '" data-v-aba="' + x.aba + '"><td><b>' + esc(cmTxt(x.it)) + '</b> ' + esc(x.it.nome) +
+    '<br><small>' + esc([x.it.cor, x.aba].filter(Boolean).join(' · ')) + '</small></td><td class="n">' + fmtNum(x.v) + '</td></tr>').join('') + '</table></div>';
+  $('#vConteudo').innerHTML = h;
+  abrir('#pValores');
+}
+$('#vConteudo').addEventListener('click', e => { const r = e.target.closest('[data-v-item]'); if (r) { fechar('#pValores'); abrirDetalhe(r.dataset.vItem, r.dataset.vAba); } });
+
+/* ================================================================ formulário com previsão */
+const GRUPOS_FORM = {
+  Lesney: [
+    ['Identificação', [['mack2', 'Código Charlie Mack (ex.: 01C5)'], ['mack', 'Cl. da planilha (antiga)'], ['num', 'Nº'], ['tipo', 'Tipo (TP, GS…)'], ['nome', 'Nome', 'full']]],
+    ['Características', [['cor', 'Cor predominante'], ['base', 'Base'], ['interior', 'Interior'], ['vidro', 'Vidro'], ['roda', 'Roda'], ['ano', 'Ano'], ['outros', 'Outros detalhes (peças, carga, molde)', 'full'], ['adesivo', 'Adesivo / Decalque / Silks', 'full'], ['proced', 'Procedência']]],
+    ['Aquisição', [['dataAq', 'Data de aquisição', 'date'], ['vendedor', 'Adquirido de'], ['valor', 'Valor pago', 'num'], ['cotacao', 'Cotação U$'], ['caixa', 'Caixa (C.)'], ['cons', 'Conservação (Cl.)'], ['obs', 'Obs.', 'full']]]
+  ],
+  Superfast: [
+    ['Identificação', [['mack', 'C. C. Mack (ex.: 1A3)'], ['man', 'MAN'], ['num', 'Nº'], ['tipo', 'Tipo (TP, UK, LW…)'], ['nome', 'Nome', 'full']]],
+    ['Características', [['cor', 'Cor predominante'], ['base', 'Base'], ['interior', 'Interior'], ['vidro', 'Vidros'], ['roda', 'Rodas'], ['ano', 'Ano'], ['outros', 'Outros detalhes (peças, carga, molde)', 'full'], ['adesivo', 'Silks / Adesivo', 'full'], ['proced', 'Procedência']]],
+    ['Aquisição', [['dataAq', 'Data de aquisição', 'date'], ['vendedor', 'Adquirido de'], ['valor', 'Valor pago', 'num'], ['cotacao', 'Cotação U$'], ['caixa', 'Caixa (C.)'], ['cons', 'Conservação (Cl.)'], ['obs', 'Obs.'], ['nota', 'Nota']]]
+  ]
+};
+
+function frequencias(arr, k) {
+  const c = {};
+  arr.forEach(x => { const v = String(x[k] == null ? '' : x[k]).trim(); if (v) c[v] = (c[v] || 0) + 1; });
+  return Object.keys(c).sort((a, b) => c[b] - c[a]);
+}
+function montarDatalist(k, prioridade) {
+  const id = 'dl-' + k;
+  let dl = document.getElementById(id);
+  if (!dl) { dl = document.createElement('datalist'); dl.id = id; $('#datalists').appendChild(dl); }
+  const vals = Array.from(new Set((prioridade || []).concat(frequencias(S.items[S.aba], k)))).slice(0, 250);
+  dl.innerHTML = vals.map(v => '<option value="' + esc(v) + '">').join('');
+}
+
+function abrirForm(base, editar) {
+  S.editando = editar ? base : null;
+  const aba = S.aba;
+  $('#fTitulo').textContent = editar ? 'Editar ' + base.nome : 'Nova miniatura · ' + aba;
+  let h = '<div id="fAviso"></div>';
+  GRUPOS_FORM[aba].forEach(g => {
+    h += '<fieldset><legend>' + g[0] + '</legend><div class="grade">';
+    g[1].forEach(f => {
+      const k = f[0], tipo = f[2], v = base && base[k] != null ? base[k] : '';
+      const attrs = tipo === 'date' ? 'type="date"' : tipo === 'num' ? 'type="text" inputmode="decimal"' : (k === 'mack' || k === 'mack2' ? 'type="text"' : 'type="text" list="dl-' + k + '"');
+      h += '<label class="' + (tipo === 'full' ? 'full' : '') + '">' + esc(f[1]) + '<input name="' + k + '" ' + attrs + ' value="' + esc(v) + '"' +
+        (k === 'mack' || k === 'mack2' ? ' autocapitalize="characters"' : '') + (k === 'outros' ? ' placeholder="ex.: Caçamba vermelha, Esteira verde, Rodas 9x20"' : '') + '></label>';
+    });
+    h += '</div></fieldset>';
+  });
+  h += '<div id="fVariacoes"></div><div class="acoes"><button type="button" class="btn" data-fechar>Cancelar</button><button type="submit" class="btn prim">Salvar na planilha</button></div>';
+  const form = $('#form'); form.innerHTML = h;
+  GRUPOS_FORM[aba].forEach(g => g[1].forEach(f => { if (!f[2] || f[2] === 'full') montarDatalist(f[0]); }));
+  if (base && !editar) Array.prototype.forEach.call(form.elements, el => { if (el.name && el.value && el.name !== 'mack' && el.name !== 'mack2') { el.classList.add('previsto'); el.dataset.prev = el.value; } });
+  if (editar) String(base.manuais || '').split(';').filter(Boolean).forEach(k => { const el = form.elements[k]; if (el) marcarAlterado(el, true); });
+  abrir('#pForm');
+  if (base) prever(true); else setTimeout(() => (form.elements.mack2 || form.elements.mack).focus(), 250);
+}
+
+function campo(k) { return $('#form').elements[k]; }
+function setPrev(k, v) {
+  const el = campo(k);
+  if (!el || v == null || v === '') return;
+  if (el.dataset.user === '1' || (el.value && !el.classList.contains('previsto'))) return;
+  el.value = v; el.classList.add('previsto'); el.dataset.prev = String(v);
+  marcarAlterado(el);
+}
+/* Campo previsto pelo app que o Marco mudou: fica marcado como "alterado manualmente" */
+function marcarAlterado(el, forcar) {
+  const alterado = forcar || (el.dataset.prev != null && el.value.trim() !== el.dataset.prev.trim());
+  el.classList.toggle('alterado', !!alterado);
+  if (alterado) el.classList.remove('previsto');
+  else if (el.dataset.prev != null) el.classList.add('previsto');
+  el.closest('label').classList.toggle('lbl-alt', !!alterado);
+}
+
+let prevTimer = null, prevSeq = 0;
+function prever(somenteAvisos) {
+  const aba = S.aba, form = $('#form');
+  const code = form.elements.mack.value.trim(), code2 = form.elements.mack2 ? form.elements.mack2.value.trim() : '';
+  const p = parseCode(code2) || parseCode(code);
+  const aviso = $('#fAviso'), proprio = S.editando ? S.editando.id : null;
+  if (!p) { aviso.innerHTML = ''; $('#fVariacoes').innerHTML = ''; return; }
+  const mk = p.n + p.l;
+  const irm = S.items[aba].filter(x => x._m === mk && x.id !== proprio);
+  const alvo = codeNorm(code2 || code);
+  const iguais = p.v != null ? S.items[aba].filter(x => x.id !== proprio && (varKey(aba, x) === alvo || (!code2 && codeNorm(x.mack) === codeNorm(code)))) : [];
+  let msg = '';
+  if (iguais.length) {
+    const fonte = iguais.slice().sort((a, b) => String(b.dataAq).localeCompare(String(a.dataAq)))[0];
+    if (!somenteAvisos) PREVER.forEach(k => setPrev(k, fonte[k]));
+    msg += '<div class="aviso dup"><b>Você já tem ' + iguais.length + ' exemplar(es) desta variação.</b> Os campos em amarelo foram copiados do cadastro existente. Você pode mudar qualquer um; o que mudar fica marcado como <b>alterado manualmente</b>.<br>' +
+      iguais.slice(0, 5).map(x => '<button type="button" class="link" data-ver="' + esc(x.id) + '">' + esc((x.mack2 || x.mack) + ' · ' + (x.cons || 's/ cl.') + ' · ' + (fmtData(x.dataAq) || 's/ data')) + '</button>').join(' · ') + '</div>';
+  } else if (irm.length) {
+    if (!somenteAvisos) {
+      setPrev('num', p.n); setPrev('nome', frequencias(irm, 'nome')[0]); setPrev('man', frequencias(irm, 'man')[0]);
+      setPrev('proced', frequencias(irm, 'proced')[0]);
+      const anos = irm.map(x => Number(x.ano)).filter(Boolean); if (anos.length) setPrev('ano', Math.min.apply(null, anos));
+    }
+    msg += '<div class="aviso info"><b>Variação nova do modelo ' + esc(mk) + '.</b> Nome e ano previstos a partir de ' + irm.length + ' exemplar(es) da coleção; as sugestões de cada campo mostram primeiro o que já aparece neste modelo. Tudo pode ser alterado; o que você mudar fica marcado como <b>alterado manualmente</b>.</div>';
+  } else if (!somenteAvisos) {
+    setPrev('num', p.n);
+    msg += '<div class="aviso info"><b>Modelo ' + esc(mk) + ' ainda não está na coleção.</b> Consultando a referência…</div>';
+  }
+  aviso.innerHTML = msg;
+  ['nome', 'cor', 'base', 'interior', 'vidro', 'roda', 'outros', 'adesivo', 'proced', 'man', 'tipo', 'cotacao'].forEach(k => montarDatalist(k, frequencias(irm, k)));
+
+  const seq = ++prevSeq;
+  $('#fVariacoes').innerHTML = '<div class="carregando">Consultando variações de referência…</div>';
+  apiJ('getReferenceJson', aba, { mack: code, mack2: code2, nome: form.elements.nome.value }).then(ref => {
+    if (seq !== prevSeq) return;
+    if (ref.modelo && !somenteAvisos) {
+      setPrev('nome', ref.modelo.nome && !irm.length ? tituloCaso(ref.modelo.nome) : null);
+      if (ref.modelo.ano && !irm.length) setPrev('ano', ref.modelo.ano);
+    }
+    let h = '';
+    if (ref.variacoes && ref.variacoes.length) {
+      const tenho = new Set(S.items[aba].filter(x => x._m === mk).map(x => (cm(x) || {}).v));
+      h += '<fieldset><legend>Variações ' + esc(mk) + ' (Charlie Mack)</legend><div class="foto-credito">Toque para usar o código da variação.</div><ul class="sug-var">' +
+        ref.variacoes.map(v => '<li><button type="button" class="' + (tenho.has(v.v) ? 'tem' : '') + '" data-var="' + v.v + '"><b>' + v.v + '.</b> ' + esc(v.desc) + (tenho.has(v.v) ? ' — na coleção' : '') + '</button></li>').join('') + '</ul></fieldset>';
+    }
+    if (ref.fotos && ref.fotos.length) {
+      const f = ref.fotos[0];
+      h += '<fieldset><legend>Referência</legend><div class="foto-principal">' + imgTag(f.url) + '</div><div class="foto-credito legenda">' + marcar(f.legenda, f.marcadas) +
+        '<br>Fonte: <a href="' + esc(f.pagina) + '" target="_blank" rel="noopener">' + esc(f.fonte) + '</a></div></fieldset>';
+    }
+    if (!h && ref.avisos && ref.avisos.length) h = '<div class="foto-credito">' + esc(ref.avisos.join(' ')) + '</div>';
+    $('#fVariacoes').innerHTML = h;
+    const av = $('#fAviso .aviso.info b');
+    if (av && /ainda não está/.test(av.textContent)) av.parentNode.innerHTML = ref.modelo
+      ? '<b>Modelo ' + esc(mk) + ' ainda não está na coleção.</b> Nome e ano previstos pela referência (' + esc(ref.modelo.fonte) + '). Confira antes de salvar.'
+      : '<b>Modelo ' + esc(mk) + ' não encontrado na coleção nem na referência.</b> Preencha manualmente.';
+  }).catch(() => { if (seq === prevSeq) $('#fVariacoes').innerHTML = ''; });
+}
+function tituloCaso(s) { return String(s).toLowerCase().replace(/\b([a-z])/g, c => c.toUpperCase()); }
+
+$('#form').addEventListener('input', e => {
+  const el = e.target;
+  if (!el.name) return;
+  el.dataset.user = '1';
+  if (el.dataset.prev != null || el.classList.contains('alterado')) marcarAlterado(el, el.dataset.prev == null);
+  else el.classList.remove('previsto');
+  if (el.name === 'mack' || el.name === 'mack2') {
+    clearTimeout(prevTimer); prevTimer = setTimeout(() => prever(false), 450);
+  }
+});
+$('#form').addEventListener('click', e => {
+  const b = e.target.closest('[data-var],[data-ver]');
+  if (!b) return;
+  if (b.dataset.ver) { fechar('#pForm'); abrirDetalhe(b.dataset.ver); return; }
+  const alvo = campo('mack2') ? 'mack2' : 'mack';
+  const p = parseCode(campo(alvo).value) || parseCode(campo('mack').value);
+  if (!p) return;
+  campo(alvo).value = formatCode(S.aba, p.n, p.l, b.dataset.var);
+  campo(alvo).dataset.user = '1';
+  prever(false);
+});
+$('#form').addEventListener('submit', e => { e.preventDefault(); salvar(); });
+$('#fSalvarTopo').addEventListener('click', salvar);
+
+function salvar() {
+  const form = $('#form'), obj = {};
+  const manuais = new Set(S.editando ? String(S.editando.manuais || '').split(';').filter(Boolean) : []);
+  Array.prototype.forEach.call(form.elements, el => {
+    if (!el.name) return;
+    obj[el.name] = el.value.trim();
+    if (el.classList.contains('alterado')) manuais.add(el.name);
+    else if (el.classList.contains('previsto')) manuais.delete(el.name);
+  });
+  obj.manuais = Array.from(manuais).join(';');
+  if (!obj.nome) { toast('Informe o nome do modelo.', true); campo('nome').focus(); return; }
+  if (!obj.mack && !obj.mack2) { toast('Informe o código Mack.', true); campo('mack').focus(); return; }
+  const editando = S.editando;
+  if (editando) obj.id = editando.id;
+  const btns = document.querySelectorAll('#form button[type=submit], #fSalvarTopo');
+  btns.forEach(b => b.disabled = true);
+  toast('Gravando na planilha…');
+  api('saveItem', S.aba, obj).then(salvo => {
+    const lista = S.items[S.aba], novo = prep(salvo);
+    if (editando) {
+      const i = lista.findIndex(x => x.id === salvo.id); lista[i] = novo; delete S.refCache[salvo.id];
+    } else {
+      let pos = -1; lista.forEach((x, i) => { if (String(x.num) === String(novo.num)) pos = i; });
+      if (pos < 0) { lista.forEach((x, i) => { if (Number(x.num) < Number(novo.num)) pos = i; }); }
+      lista.splice(pos < 0 ? lista.length : pos + 1, 0, novo);
+      $('#qtd' + S.aba).textContent = '(' + lista.length + ')';
+    }
+    S.nomesCache = {};
+    toast(editando ? 'Alterações salvas' : 'Miniatura cadastrada · ' + salvo.id);
+    fechar('#pForm'); renderLista(); abrirDetalhe(salvo.id);
+    const pend = S.fotoPendente; S.fotoPendente = null;
+    if (pend && !editando) api('uploadPhoto', S.aba, salvo.id, pend).then(l => { novo.fotos = l; if (S.atual === novo) renderDetalhe(); renderLista(); toast('Foto da busca guardada nesta miniatura'); })
+      .catch(err => toast('A foto não foi guardada: ' + err.message, true));
+  }).catch(err => toast('Não salvou: ' + err.message, true)).finally(() => btns.forEach(b => b.disabled = false));
+}
+
+/* ================================================================ ações do detalhe */
+$('#dConteudo').addEventListener('click', e => {
+  const t = e.target.closest('[data-foto-i],[data-acao],[data-ir],[data-procurar],[data-var]');
+  if (!t) return;
+  e.preventDefault();
+  const it = S.atual;
+  if (t.dataset.ir) { navegar(t.dataset.ir); return; }
+  if (t.dataset.procurar) { alternarProcura(t.dataset.procurar, t.dataset.desc, 'Lesney').then(() => renderDetalhe()); return; }
+  if (t.dataset.acao === 'compartilhar') { compartilharItem(it); return; }
+  if (t.dataset.acao === 'comparar') { abrirComparar(it); return; }
+  if (t.dataset.var) { irParaVariacao(it, +t.dataset.var); return; }
+  if (t.dataset.acao === 'marcarVar' || t.dataset.acao === 'desmarcarVar') {
+    const f = listaFotos(it)[S.selFoto] || listaFotos(it)[0];
+    const r = refInfo(it.fotoRef), marcar = t.dataset.acao === 'marcarVar';
+    const url = marcar ? f.url : r.url, drive = marcar ? (f.drive || (f.url === r.url ? r.id : null)) : r.id;
+    api('setFotoRef', S.aba, it.id, url, drive, marcar).then(v => { it.fotoRef = v; S.selFoto = 0; renderDetalhe(); renderLista(); toast(marcar ? 'Marcada como foto desta variação' : 'Marcação desfeita'); })
+      .catch(err => toast(err.message, true));
+    return;
+  }
+  if (t.dataset.fotoI != null) { S.selFoto = +t.dataset.fotoI; renderDetalhe(); return; }
+  const a = t.dataset.acao;
+  if (a === 'addFoto') escolherOrigemFoto('item');
+  if (a === 'usarRef') {
+    const f = listaFotos(it)[S.selFoto];
+    api('setFotoRef', S.aba, it.id, f.url, f.drive || null).then(v => { it.fotoRef = v; return api('setCapa', S.aba, it.id, 'ref'); })
+      .then(v => { it.capa = v; S.selFoto = 0; renderDetalhe(); renderLista(); toast('Foto principal definida'); }).catch(err => toast(err.message, true));
+  }
+  if (a === 'principal') {
+    const v = t.dataset.foto; it.capa = v; S.selFoto = 0;
+    api('setCapa', S.aba, it.id, v).then(() => { agendarEnquadre(it, v, true); renderDetalhe(); renderLista(); toast('Foto principal definida'); }).catch(err => toast(err.message, true));
+  }
+  if (a === 'enquadrar') abrirEnquadre(it, t.dataset.foto);
+  if (a === 'bamcaTudo') { S.bamcaTudo = S.bamcaTudo === t.dataset.chave ? null : t.dataset.chave; renderDetalhe(); }
+  if (a === 'refazerFoto') {
+    toast('Abrindo a foto…');
+    api('getDrivePhoto', t.dataset.foto, 1600).then(d => fetch(d)).then(r => r.blob())
+      .then(b => abrirEditor([b], { it: it, aba: S.aba, substituir: t.dataset.foto })).catch(err => toast('Não abriu a foto: ' + err.message, true));
+  }
+  if (a === 'removerFoto') confirmar('Remover esta foto da coleção? Ela vai para a lixeira do Drive.').then(ok => {
+    if (!ok) return;
+    api('removePhoto', S.aba, it.id, t.dataset.foto).then(l => { it.fotos = l; S.selFoto = 0; renderDetalhe(); renderLista(); }).catch(err => toast(err.message, true));
+  });
+  if (a === 'duplicar') {
+    const base = {};
+    PREVER.concat(['mack', 'mack2']).forEach(k => base[k] = it[k]);
+    fechar('#pDetalhe'); abrirForm(base, false);
+  }
+  if (a === 'excluir') confirmar('Excluir "' + it.nome + '" (' + (it.mack2 || it.mack) + ')? A linha sai da planilha e fica guardada na Lixeira, de onde pode ser restaurada.').then(ok => {
+    if (!ok) return;
+    api('deleteItem', S.aba, it.id).then(() => {
+      const l = S.items[S.aba]; l.splice(l.indexOf(it), 1);
+      $('#qtd' + S.aba).textContent = '(' + l.length + ')';
+      fechar('#pDetalhe'); renderLista(); toast('Excluído · disponível na Lixeira');
+    }).catch(err => toast(err.message, true));
+  });
+});
+$('#dEditar').addEventListener('click', () => { const it = S.atual; S.pilha = []; fechar('#pDetalhe'); abrirForm(it, true); });
+$('#dVoltar').addEventListener('click', () => {
+  if (S.pilha.length) { const p = S.pilha.pop(); abrirDetalhe(p.id, p.aba); return; }
+  fechar('#pDetalhe');
+});
+function navegar(id, aba) {
+  if (S.atual) S.pilha.push({ id: S.atual.id, aba: S.aba });
+  abrirDetalhe(id, aba);
+}
+function irParaVariacao(it, v) {
+  const copias = S.items[S.aba].filter(x => x._m === it._m && (cm(x) || {}).v === v);
+  if (!copias.length) return;
+  if (copias.length === 1) { if (copias[0] !== it) navegar(copias[0].id); else toast('Este é o exemplar aberto.'); return; }
+  const m = $('#menu'), nav = $('#menuNav');
+  nav.innerHTML = '<h3>Variação ' + v + ' · ' + copias.length + ' exemplares</h3>' + copias.map(x => '<button data-abrir="' + esc(x.id) + '">' +
+    esc((S.aba === 'Lesney' ? (x.mack2 || x.mack) : x.mack) + ' · ' + [x.cor, x.cons, x.dataAq ? 'adquirido ' + fmtData(x.dataAq) : ''].filter(Boolean).join(' · ')) +
+    (x === it ? ' (aberto)' : '') + '</button>').join('') + '<button data-m="fechar">Cancelar</button>';
+  m.classList.add('aberto');
+}
+document.addEventListener('click', e => {
+  const b = e.target.closest('[data-abrir]'); if (!b) return;
+  $('#menu').classList.remove('aberto');
+  if (!S.atual || b.dataset.abrir !== S.atual.id) navegar(b.dataset.abrir);
+});
+
+/* ================================================================ painéis, menu, confirmação */
+function abrir(sel) { const p = $(sel); p.classList.add('aberto'); p.setAttribute('aria-hidden', 'false'); p.scrollTop = 0; }
+function fechar(sel) { const p = $(sel); p.classList.remove('aberto'); p.setAttribute('aria-hidden', 'true'); if (sel === '#pDetalhe') S.pilha = []; }
+document.addEventListener('click', e => { const b = e.target.closest('[data-fechar]'); if (b) fechar('#' + b.closest('.painel').id); });
+
+function confirmar(msg) {
+  return new Promise(res => {
+    const m = $('#menu'), nav = $('#menuNav');
+    nav.innerHTML = '<h3>Confirmar</h3><div class="info" style="color:#1B1B1B;font-size:15px">' + esc(msg) + '</div>' +
+      '<button data-r="1" style="background:#C8201E;color:#fff;border-color:#C8201E">Sim, confirmar</button><button data-r="0">Cancelar</button>';
+    m.classList.add('aberto');
+    const h = e => {
+      const b = e.target.closest('[data-r]'); if (!b && e.target !== m) return;
+      m.classList.remove('aberto'); m.removeEventListener('click', h); res(b && b.dataset.r === '1');
+    };
+    m.addEventListener('click', h);
+  });
+}
+
+function abrirMenu() {
+  const m = $('#menu'), nav = $('#menuNav');
+  nav.innerHTML = '<h3>Matchbox</h3>' +
+    '<button data-m="seguranca">Segurança dos dados e cópias</button>' +
+    '<button data-m="lixeira">Lixeira (itens excluídos)</button>' +
+    '<button data-m="procura">Lista de procura (feira)</button>' +
+    '<button data-m="valores">Valores da coleção</button>' +
+    '<button data-m="gerar">Gerar planilha da coleção (cópia para enviar ou abrir no Excel)</button>' +
+    '<button data-m="realce">Realçar fotos nas miniaturas: ' + (S.realce ? 'ligado' : 'desligado') + '</button>' +
+    '<button data-m="centralizar">Centralizar o carrinho nas fotos novas: ' + (S.centralizar ? 'ligado' : 'desligado') + '</button>' +
+    '<button data-m="instalar">Ícone do app no celular</button>' +
+    '<button data-m="recarregar">Recarregar dados da planilha</button>' +
+    '<button data-m="fechar">Fechar</button><div class="info">Referência: lista de variações de Charlie Mack (publicada em fcarnahan.com com permissão do autor) e arquivo Nick Jones / Lesney Matchbox, importados para uso pessoal, com crédito às fontes.</div>';
+  m.classList.add('aberto');
+}
+$('#btnMenu').addEventListener('click', abrirMenu);
+$('#menu').addEventListener('click', e => {
+  const b = e.target.closest('[data-m]');
+  if (e.target === $('#menu') || (b && b.dataset.m === 'fechar')) { $('#menu').classList.remove('aberto'); return; }
+  if (!b) return;
+  if (b.dataset.m === 'seguranca') { $('#menu').classList.remove('aberto'); abrirSeguranca(); }
+  if (b.dataset.m === 'realce' || b.dataset.m === 'centralizar') {
+    const k = b.dataset.m; S[k] = !S[k];
+    try { localStorage.setItem('mbx_' + k, S[k] ? '1' : '0'); } catch (err) { /* sem armazenamento */ }
+    document.body.classList.toggle('realce', S.realce);
+    $('#menu').classList.remove('aberto'); toast((k === 'realce' ? 'Realce das fotos ' : 'Centralizar fotos novas: ') + (S[k] ? 'ligado' : 'desligado')); return;
+  }
+  if (b.dataset.m === 'gerar') { $('#menu').classList.remove('aberto'); gerarPlanilhaApp(); return; }
+  if (b.dataset.m === 'valores') { $('#menu').classList.remove('aberto'); abrirValores(); return; }
+  if (b.dataset.m === 'procura') { $('#menu').classList.remove('aberto'); abrirProcura(); }
+  if (b.dataset.m === 'instalar') { $('#menu').classList.remove('aberto'); abrirInstalar(); }
+  if (b.dataset.m === 'recarregar') { $('#menu').classList.remove('aberto'); toast('Recarregando…'); carregar().then(() => { renderLista(); toast('Dados atualizados'); }); }
+  if (b.dataset.m === 'lixeira') {
+    $('#menuNav').innerHTML = '<h3>Lixeira</h3><div id="lx" class="info">Carregando…</div><button data-m="fechar">Fechar</button>';
+    api('listTrash').then(l => {
+      $('#lx').innerHTML = l.length ? l.map(x => '<div class="lixo-item"><b>' + esc(x.item.nome) + '</b> · ' + esc(x.aba) + ' · ' + esc(x.item.mack2 || x.item.mack) +
+        '<br><small>excluído em ' + esc(x.quando) + '</small><br><button data-restaurar="' + x.linha + '">Restaurar</button></div>').join('') : 'A lixeira está vazia.';
+    });
+  }
+});
+document.addEventListener('click', e => {
+  const b = e.target.closest('[data-restaurar]'); if (!b) return;
+  b.disabled = true;
+  api('restoreItem', +b.dataset.restaurar).then(r => {
+    $('#menu').classList.remove('aberto');
+    return carregar().then(() => { S.aba = r.aba; trocarAba(r.aba); toast('Item restaurado'); });
+  }).catch(err => { b.disabled = false; toast(err.message, true); });
+});
+
+/* ================================================================ segurança dos dados */
+const PASSOS = [
+  ['Apaguei uma miniatura por engano', [
+    'Toque no menu (as três linhas no alto, à direita) e escolha <b>Lixeira</b>.',
+    'Encontre a miniatura e toque em <b>Restaurar</b>. Ela volta para o mesmo lugar, com todos os dados e fotos.']],
+  ['Alterei dados por engano ou algo ficou estranho na coleção', [
+    'Nesta tela, em <b>Cópias de segurança</b>, escolha a cópia do dia em que estava tudo certo.',
+    'Toque em <b>Restaurar esta cópia</b> e confirme.',
+    'Antes de restaurar, o app guarda o estado atual na cópia <b>“Antes da restauração”</b>. Se mudar de ideia, restaure essa cópia.',
+    'Atenção: o que foi cadastrado depois da data da cópia escolhida precisa ser cadastrado de novo.']],
+  ['O aplicativo não abre', [
+    'No computador, abra a planilha <b>Matchbox_Colecao_Marco</b> no Google Drive.',
+    'No menu de cima, clique em <b>Matchbox App &gt; Restaurar uma cópia de segurança…</b>',
+    'Digite o número da cópia desejada e confirme. Funciona mesmo com o app fora do ar.']],
+  ['Nem a planilha abre ou foi apagada', [
+    'No Google Drive, abra a pasta <b>Matchbox • Backups</b>.',
+    'Cada arquivo <b>“Cópia Matchbox — (dia)”</b> é uma planilha completa. Abra a mais recente que estiver correta.',
+    'Se a planilha principal foi para a lixeira do Drive, recupere por <b>Lixeira &gt; Restaurar</b> (fica lá por 30 dias).',
+    'Peça ajuda ao Je para religar o aplicativo nessa planilha.']]
+];
+
+function gerarPlanilhaApp() {
+  toast('Gerando a planilha… (uns 20 segundos)');
+  apiJ('gerarPlanilha').then(r => {
+    const m = $('#menu'), nav = $('#menuNav');
+    nav.innerHTML = '<h3>Planilha gerada</h3><div class="info" style="color:#1B1B1B;font-size:15px">' + esc(r.nome) +
+      '<br><small>Cópia só com os seus dados, sem as colunas internas do app. Fica na pasta Matchbox • Exportações. Mexer nela não altera o app.</small></div>' +
+      '<a class="btn prim" style="display:block;text-align:center;text-decoration:none;margin:8px 0" href="' + esc(r.url) + '" target="_blank" rel="noopener">Abrir no Google Planilhas</a>' +
+      '<a class="btn" style="display:block;text-align:center;text-decoration:none;margin:8px 0" href="' + esc(r.xlsx) + '" target="_blank" rel="noopener">Baixar em Excel (.xlsx)</a>' +
+      '<button data-r="0">Fechar</button>';
+    m.classList.add('aberto');
+    const h = e => { if (e.target.closest('[data-r]') || e.target === m) { m.classList.remove('aberto'); m.removeEventListener('click', h); } };
+    m.addEventListener('click', h);
+  }).catch(err => toast('Não consegui gerar a planilha: ' + err.message, true));
+}
+
+function abrirSeguranca() {
+  $('#sConteudo').innerHTML = '<div class="carregando">Verificando seus dados…</div>';
+  abrir('#pSeg');
+  apiJ('getSeguranca').then(renderSeguranca).catch(err => { $('#sConteudo').innerHTML = '<div class="aviso dup">' + esc(err.message) + '</div>'; });
+}
+
+function renderSeguranca(s) {
+  S.seg = s;
+  const okCopia = s.ultima && s.horasDesdeUltima < 36 && s.gatilhoAtivo;
+  const okInteg = !s.integridade.problemas;
+  let h = '<div class="selo-seg ' + (okCopia && okInteg ? 'ok' : 'alerta') + '"><b>' + (okCopia && okInteg ? 'Seus dados estão protegidos' : 'Atenção') + '</b>' +
+    (s.ultima ? '<span>Última cópia: ' + esc(s.ultima.quando) + '</span>' : '<span>Nenhuma cópia encontrada</span>') +
+    (!s.gatilhoAtivo ? '<span>A cópia diária automática não está ligada. No computador: planilha &gt; Matchbox App &gt; 1. Instalar.</span>' : '') +
+    (s.ultima && s.horasDesdeUltima >= 36 ? '<span>A última cópia tem mais de um dia.</span>' : '') +
+    (!okInteg ? '<span>' + s.integridade.problemas + ' item(ns) precisam de ajuste: veja "Conferência dos dados" abaixo.</span>' : '') + '</div>';
+
+  h += '<div class="secao"><h3>Como funciona</h3><ul class="lista-simples">' +
+    '<li>Todo dia às 3h da manhã o app faz uma <b>cópia completa</b> da planilha.</li>' +
+    '<li>São <b>7 cópias, uma por dia da semana</b>. A de cada dia substitui a da semana anterior (a substituída ainda fica 30 dias na lixeira do Drive).</li>' +
+    '<li>Tudo o que é incluído, alterado ou excluído fica anotado na aba <b>_Log</b> da planilha, com data e hora.</li>' +
+    '<li>Itens excluídos não somem: vão para a <b>Lixeira</b> do app.</li>' +
+    '<li>As cópias ficam no Google Drive, na pasta <b>Matchbox • Backups</b>' + (s.pastaUrl ? ' (<a href="' + esc(s.pastaUrl) + '" target="_blank" rel="noopener">abrir pasta</a>)' : '') + '.</li></ul>' +
+    '<div class="acoes"><button class="btn prim" data-s="copiar">Fazer uma cópia agora</button></div></div>';
+
+  const v = s.integridade, ab = v.abas;
+  h += '<div class="secao"><h3>Conferência dos dados</h3><dl class="campos">' + Object.keys(ab).map(n =>
+    '<dt>' + esc(n) + '</dt><dd>' + ab[n].itens + ' itens' + (ab[n].semId.length ? ' · <span class="alerta-txt">' + ab[n].semId.length + ' sem identificação</span>' : '') +
+    (ab[n].duplicados.length ? ' · <span class="alerta-txt">' + ab[n].duplicados.length + ' repetidos</span>' : '') + '</dd>').join('') + '</dl>' +
+    (v.problemas ? '<div class="foto-credito">Linhas sem identificação geralmente são itens digitados direto na planilha. O botão abaixo as inclui no app.</div><div class="acoes"><button class="btn prim" data-s="corrigir">Corrigir agora</button></div>'
+      : '<div class="foto-credito">Tudo certo: cada miniatura tem uma identificação única.</div>') +
+    (s.semanal ? '<div class="foto-credito">Conferência automática semanal (segundas, 4h): última em ' + esc(s.semanal.quando) + ' · ' +
+      (s.semanal.ok ? 'tudo certo' : s.semanal.repetidos + ' ID(s) repetido(s) para revisar') + (s.semanal.corrigidos ? ' · ' + s.semanal.corrigidos + ' linha(s) recebeu(ram) ID' : '') +
+      (s.semanal.copiaRefeita ? ' · a cópia estava atrasada e foi refeita' : '') + '.</div>' : '') + '</div>';
+
+  h += '<div class="secao"><h3>Cópias de segurança</h3>' + (s.backups.length ? s.backups.map(b =>
+    '<div class="copia"><div><b>' + esc(b.nome.replace('Cópia Matchbox — ', '')) + '</b><span>' + esc(b.quando) + '</span></div>' +
+    '<div class="copia-acoes"><a href="' + esc(b.url) + '" target="_blank" rel="noopener">Abrir</a><button data-restaurar-copia="' + esc(b.id) + '" data-nome="' + esc(b.nome) + '" data-quando="' + esc(b.quando) + '">Restaurar esta cópia</button></div></div>').join('')
+    : '<div class="foto-credito">Ainda não há cópias.</div>') + '</div>';
+
+  h += '<div class="secao"><h3>Passo a passo: como recuperar</h3>' + PASSOS.map((p, i) =>
+    '<details' + (i === 0 ? ' open' : '') + '><summary>' + p[0] + '</summary><ol>' + p[1].map(x => '<li>' + x + '</li>').join('') + '</ol></details>').join('') + '</div>';
+
+  if (s.referencia || s.referenciaRodando) {
+    const r = s.referencia || {};
+    h += '<div class="secao"><h3>Referência importada</h3><div class="foto-credito">' + (s.referenciaRodando ? 'Importando em segundo plano: ' : '') +
+      esc(r.fase || 'iniciando') + (r.total ? ' · ' + r.feitos + ' de ' + r.total + ' páginas' : '') + (r.fotos ? ' · ' + r.fotos + ' fotos guardadas' : '') + '</div></div>';
+  }
+  $('#sConteudo').innerHTML = h;
+  atualizarStatusSeg(s);
+}
+
+function atualizarStatusSeg(s) {
+  const el = $('#statusSeg'); if (!el) return;
+  const ok = s.ultima && s.horasDesdeUltima < 36 && s.gatilhoAtivo && !s.integridade.problemas;
+  el.className = 'status-seg ' + (ok ? 'ok' : 'alerta');
+  el.innerHTML = (ok ? 'Dados protegidos · última cópia ' + esc(s.ultima.quando) : 'Atenção com a segurança dos dados') + ' · <u>ver</u>';
+}
+
+$('#sConteudo').addEventListener('click', e => {
+  const b = e.target.closest('[data-s],[data-restaurar-copia]');
+  if (!b) return;
+  if (b.dataset.s === 'copiar') {
+    b.disabled = true; b.textContent = 'Fazendo a cópia…';
+    api('backupAgora').then(() => { toast('Cópia feita'); abrirSeguranca(); }).catch(err => { b.disabled = false; toast(err.message, true); });
+  }
+  if (b.dataset.s === 'corrigir') {
+    b.disabled = true;
+    apiJ('corrigirIntegridadeApp').then(r => { toast(r.corrigidos + ' item(ns) corrigido(s)'); return carregar().then(() => { renderLista(); abrirSeguranca(); }); })
+      .catch(err => { b.disabled = false; toast(err.message, true); });
+  }
+  if (b.dataset.restaurarCopia) {
+    confirmar('Restaurar a cópia "' + b.dataset.nome.replace('Cópia Matchbox — ', '') + '" de ' + b.dataset.quando + '?\n\nA coleção (Lesney e Superfast) volta a ficar exatamente como estava nessa data. O estado atual será guardado antes, na cópia "Antes da restauração".').then(ok => {
+      if (!ok) return;
+      toast('Restaurando… não feche o app.');
+      apiJ('restaurarBackupApp', b.dataset.restaurarCopia).then(r => carregar().then(() => {
+        renderLista(); abrirSeguranca();
+        toast('Restaurado: ' + r.itens.Lesney + ' Lesney e ' + r.itens.Superfast + ' Superfast');
+      })).catch(err => toast('Não foi possível restaurar: ' + err.message, true));
+    });
+  }
+});
+$('#statusSeg').addEventListener('click', abrirSeguranca);
+
+/* ================================================================ navegação */
+function trocarAba(aba) {
+  S.aba = aba; S.limite = 150;
+  document.querySelectorAll('.aba').forEach(b => b.classList.toggle('ativa', b.dataset.aba === aba));
+  $('#datalists').innerHTML = '';
+  renderLista(); window.scrollTo(0, 0);
+}
+$('#abas').addEventListener('click', e => { const b = e.target.closest('.aba'); if (b) trocarAba(b.dataset.aba); });
+$('#filtros').addEventListener('click', e => { const b = e.target.closest('.hl'); if (!b) return; if (b.dataset.procura) { abrirProcura(); return; } S.filtro = b.dataset.f || null; S.limite = 150; renderFiltros(); renderLista(); });
+let qTimer;
+$('#q').addEventListener('input', e => { clearTimeout(qTimer); qTimer = setTimeout(() => { S.q = e.target.value; S.limite = 150; renderLista(); }, 180); });
+$('#lista').addEventListener('click', e => {
+  if (S.peekFez) { S.peekFez = false; e.preventDefault(); return; }
+  if (e.target.id === 'maisBtn') { S.limite += 300; renderLista(); return; }
+  const c = e.target.closest('.card,.tile'); if (c) abrirDetalhe(c.dataset.id);
+});
+$('#vistas').addEventListener('click', e => {
+  const b = e.target.closest('[data-vista]'); if (!b) return;
+  S.vista = b.dataset.vista; try { localStorage.setItem('mbx_vista', S.vista); } catch (err) { /* sem armazenamento */ }
+  renderLista();
+});
+$('#fab').addEventListener('click', () => abrirForm(null, false));
+function ajustarTopo() { $('#busca').style.top = $('#topo').offsetHeight + 'px'; }
+window.addEventListener('resize', ajustarTopo);
+
+/* ================================================================ busca por foto */
+$('#btnCam').addEventListener('click', () => escolherOrigemFoto('busca'));
+$('#fbOutra').addEventListener('click', () => escolherOrigemFoto('busca'));
+if (S.ia === null) api('iaDisponivel').then(ok => { S.ia = ok; }).catch(() => { S.ia = false; });
+function mostrarSemIa() {
+  $('#fbConteudo').innerHTML = '<div class="aviso info"><b>A busca por foto ainda não está ligada.</b><br>Ela usa o reconhecimento de imagem do Google (Gemini). ' +
+    'Para ligar, no computador: abra a planilha <b>Matchbox_Colecao_Marco</b> &gt; menu <b>Matchbox App</b> &gt; <b>Configurar reconhecimento por foto</b> e cole a chave gratuita do Google AI Studio.</div>' +
+    '<div class="foto-credito">Enquanto isso, a busca por texto continua funcionando normalmente.</div>';
+  abrir('#pFotoBusca');
+}
+function buscarPorFoto(f) {
+  const rodada = (S.fbRodada = (S.fbRodada || 0) + 1);
+  reduzirImagem(f, 1600, S.centralizar).then(d => {
+    S.fotoBusca = d;
+    $('#fbConteudo').innerHTML = '<img class="fb-foto" src="' + d + '" alt=""><div class="carregando" style="margin-top:10px">Analisando a foto… (alguns segundos)</div>';
+    abrir('#pFotoBusca');
+    let mostrouCor = false;
+    // se o Google demorar, mostra logo a busca pela cor; o resultado do Google entra quando chegar
+    const tm = setTimeout(() => { if (S.fbRodada === rodada) { mostrouCor = true; buscaPorCor({ motivo: 'demora' }); } }, 20000);
+    return reduzirImagem(f, 1024, S.centralizar).then(p => apiJ('reconhecerImagem', p)).catch(err => ({ ok: false, motivo: 'erro', mensagem: err.message })).then(res => {
+      clearTimeout(tm);
+      if (S.fbRodada !== rodada || !$('#pFotoBusca').classList.contains('aberto')) return;
+      if (res.ok || !mostrouCor) renderFotoBusca(res);
+      else { const a = $('#fbAvisoCor'); if (a) a.innerHTML = 'O reconhecimento do modelo pelo Google não respondeu agora (' + esc(res.mensagem || 'erro') + '). Use a busca pela <b>cor</b> abaixo.'; }
+    });
+  }).catch(err => { $('#fbConteudo').insertAdjacentHTML('beforeend', '<div class="aviso dup">Não foi possível abrir a foto: ' + esc(err.message) + '</div>'); });
+}
+['#arquivoBusca', '#arquivoBuscaCam'].forEach(sel => $(sel).addEventListener('change', e => {
+  const f = e.target.files[0]; e.target.value = ''; if (f) buscarPorFoto(f);
+}));
+function noColecao(c) {
+  const nomeT = norm(c.nome).split(/[^a-z0-9]+/).filter(w => w.length > 2);
+  const corT = norm((c.cor_pt || '') + ' ' + (c.cor_en || '')).split(/\s+/).filter(w => w.length > 2);
+  const out = [];
+  ['Lesney', 'Superfast'].forEach(aba => (S.items[aba] || []).forEach(it => {
+    let sc = 0;
+    if (c.numero && String(it.num) === String(c.numero)) sc += 3;
+    const hn = norm(it.nome);
+    if (nomeT.length) sc += 4 * nomeT.filter(w => hn.indexOf(w) >= 0).length / nomeT.length;
+    if (sc < 3) return;
+    if (corT.some(w => norm(it.cor).indexOf(w) >= 0)) sc += 1;
+    if (c.serie && norm(c.serie) === norm(aba)) sc += 1;
+    out.push({ aba: aba, it: it, sc: sc });
+  }));
+  return out.sort((a, b) => b.sc - a.sc).slice(0, 9);
+}
+function renderFotoBusca(res) {
+  let h = '<img class="fb-foto" src="' + S.fotoBusca + '" alt="">';
+  if (!res.ok) { buscaPorCor(res); return; }
+  const r = res.r || {}, cs = r.candidatos || [];
+  if (r.observacao_pt) h += '<div class="foto-credito">' + esc(r.observacao_pt) + '</div>';
+  if (!cs.length) h += '<div class="aviso dup">Não reconheci uma miniatura nesta foto. Tente com o carrinho de lado, bem iluminado, ocupando a foto.</div>';
+  S.fbCand = cs;
+  cs.forEach((c, i) => {
+    const achados = noColecao(c);
+    h += '<div class="fb-palpite"><span class="conf">' + Math.round((Number(c.confianca) || 0) * 100) + '% de certeza</span><b>' + (i === 0 ? 'Mais provável: ' : 'Ou: ') +
+      'No. ' + esc(c.numero) + ' · ' + esc(c.nome) + '</b><div class="foto-credito">' + esc([c.serie, c.ano, c.cor_pt, c.rodas ? 'rodas ' + c.rodas : '', c.texto_base ? 'base: "' + c.texto_base + '"' : ''].filter(Boolean).join(' · ')) + '</div>' +
+      (achados.length ? '<div class="foto-credito"><b>Na sua coleção:</b></div>' + achados.map(a => '<button class="card" data-fb-item="' + esc(a.it.id) + '" data-fb-aba="' + a.aba + '"><div class="thumb">' +
+        capaDe(a) + '</div><div class="meio"><div class="nome">' + esc(a.it.nome) + '</div><div class="sub"><span class="cod">' + esc(a.aba === 'Lesney' ? (a.it.mack2 || a.it.mack) : a.it.mack) + '</span> ' +
+        esc([a.it.cor, a.it.roda, a.aba].filter(Boolean).join(' · ')) + '</div></div>' + (a.it.cons ? '<span class="cons">' + esc(a.it.cons) + '</span>' : '') + '</button>').join('')
+        : '<div class="foto-credito"><b>Não encontrei este modelo na sua coleção.</b></div>') +
+      '<div class="acoes"><button class="btn" data-fb-buscar="' + i + '">Ver na lista</button><button class="btn prim" data-fb-novo="' + i + '">Cadastrar com esta foto</button></div></div>';
+  });
+  h += '<div class="foto-credito">Reconhecimento automático: confira sempre o código Mack antes de salvar.</div>';
+  $('#fbConteudo').innerHTML = h;
+}
+function capaDe(a) { const ab = S.aba; S.aba = a.aba; const c = capa(a.it, 160).html; S.aba = ab; if (S.idxAba !== ab) indiceModelos(ab); return c; }
+$('#fbConteudo').addEventListener('click', e => {
+  const b = e.target.closest('[data-fb-item],[data-fb-buscar],[data-fb-novo]'); if (!b) return;
+  if (b.dataset.fbItem) { fechar('#pFotoBusca'); abrirDetalhe(b.dataset.fbItem, b.dataset.fbAba); return; }
+  const c = S.fbCand[+(b.dataset.fbBuscar || b.dataset.fbNovo)];
+  if (b.dataset.fbBuscar) {
+    fechar('#pFotoBusca'); S.filtro = null; S.q = c.nome; $('#q').value = c.nome;
+    if (c.serie && /superfast/i.test(c.serie) && S.aba !== 'Superfast') trocarAba('Superfast'); else if (c.serie && /lesney/i.test(c.serie) && S.aba !== 'Lesney') trocarAba('Lesney'); else renderLista();
+    return;
+  }
+  const aba = c.serie && /superfast/i.test(c.serie) ? 'Superfast' : 'Lesney';
+  if (S.aba !== aba) trocarAba(aba);
+  S.fotoPendente = S.fotoBusca;
+  fechar('#pFotoBusca');
+  abrirForm({ num: c.numero || '', nome: c.nome || '', cor: c.cor_pt ? c.cor_pt.charAt(0).toUpperCase() + c.cor_pt.slice(1) : '', ano: c.ano || '' }, false);
+  toast('A foto será guardada junto ao salvar');
+});
+
+/* Sem o reconhecimento do Google (ou se ele falhar): procura pela cor do carrinho na foto */
+const CORES_PT = [['vermelho', 0, 15], ['laranja', 15, 40], ['amarelo', 40, 68], ['verde', 68, 165], ['azul', 165, 255], ['roxo', 255, 290], ['rosa', 290, 335], ['vermelho', 335, 361]];
+function corDominante(img) {
+  const obj = (() => { try { return acharObjeto(img); } catch (e) { return null; } })() || { x: img.width * 0.2, y: img.height * 0.2, w: img.width * 0.6, h: img.height * 0.6 };
+  const W = 120, k = W / Math.max(obj.w, obj.h), w = Math.max(4, Math.round(obj.w * k)), h = Math.max(4, Math.round(obj.h * k));
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  const x = c.getContext('2d'); x.drawImage(img, obj.x, obj.y, obj.w, obj.h, 0, 0, w, h);
+  const d = x.getImageData(Math.round(w * 0.1), Math.round(h * 0.1), Math.round(w * 0.8), Math.round(h * 0.8)).data;
+  const md = acharObjeto.ultimo, dd = (p, q) => Math.abs(p[0] - q[0]) + Math.abs(p[1] - q[1]) + Math.abs(p[2] - q[2]);
+  let ehFundo = md ? (i => Math.min.apply(null, md.fundo.map(q => dd([d[i], d[i + 1], d[i + 2]], q))) <= md.lim) : () => false;
+  let votos = {}, neutros = 0, claros = 0, escuros = 0, n = 0;
+  for (let volta = 0; volta < 2; volta++) {
+  votos = {}; neutros = 0; claros = 0; escuros = 0; n = 0; let fora = 0;
+  for (let i = 0; i < d.length; i += 4) {
+    fora++;
+    if (ehFundo(i)) continue; // ignora o mármore / a toalha
+    const r = d[i] / 255, g = d[i + 1] / 255, b = d[i + 2] / 255, mx = Math.max(r, g, b), mn = Math.min(r, g, b), v = mx, s = mx ? (mx - mn) / mx : 0; n++;
+    if (s < 0.25 || v < 0.18) { neutros++; if (v > 0.75) claros++; else if (v < 0.3) escuros++; continue; }
+    let hh = mx === mn ? 0 : mx === r ? 60 * (((g - b) / (mx - mn)) % 6) : mx === g ? 60 * ((b - r) / (mx - mn) + 2) : 60 * ((r - g) / (mx - mn) + 4);
+    if (hh < 0) hh += 360;
+    let nome = (CORES_PT.find(c2 => hh >= c2[1] && hh < c2[2]) || ['vermelho'])[0];
+    if ((nome === 'laranja' || nome === 'amarelo') && v < 0.55) nome = 'marrom';
+    votos[nome] = (votos[nome] || 0) + 1;
+  }
+  if (n >= fora * 0.08) break;
+  ehFundo = () => false; // quase tudo pareceu fundo: conta a área toda
+  }
+  const ord = Object.keys(votos).sort((a, b) => votos[b] - votos[a]);
+  if (!ord.length || votos[ord[0]] < n * 0.12) return claros > escuros ? 'branco' : escuros > neutros * 0.5 ? 'preto' : 'prata';
+  return ord[0];
+}
+function buscaPorCor(res) {
+  const semChave = res && res.motivo === 'sem_chave';
+  carregarImg(S.fotoBusca).then(img => {
+    const cor = corDominante(img);
+    S.fbCor = cor; S.fbFiltro = '';
+    $('#fbConteudo').innerHTML = '<img class="fb-foto" src="' + S.fotoBusca + '" alt="">' +
+      '<div class="aviso info" id="fbAvisoCor">' + (res && res.motivo === 'demora' ? 'O Google ainda está analisando a foto (às vezes demora até 2 minutos). Enquanto isso, procurei pela <b>cor</b> do carrinho; o resultado do Google aparece aqui quando chegar.' : semChave ? 'O reconhecimento do modelo pelo Google ainda não está ligado, então procurei pela <b>cor</b> do carrinho.'
+        : 'O reconhecimento do modelo não respondeu agora' + (res && res.mensagem ? ' (' + esc(res.mensagem) + ')' : '') + '. Procurei pela <b>cor</b> do carrinho.') + '</div>' +
+      '<div class="ed-ops" id="fbCores">' + ['vermelho', 'laranja', 'amarelo', 'verde', 'azul', 'roxo', 'rosa', 'marrom', 'branco', 'prata', 'preto', 'dourado'].map(c => '<button data-fb-cor="' + c + '"' + (c === cor ? ' class="on"' : '') + '>' + c + '</button>').join('') + '</div>' +
+      '<input id="fbRefinar" type="search" placeholder="Junte uma palavra: caminhão, ônibus, bombeiro…" style="width:100%;margin:10px 0;padding:10px;font-size:16px;border:2px solid var(--azul);border-radius:10px">' +
+      '<div id="fbRes"></div><div class="acoes"><button class="btn prim" data-fb-novo-cor="1">Cadastrar com esta foto</button></div>';
+    listarPorCor();
+  }).catch(() => mostrarSemIa());
+}
+function listarPorCor() {
+  const termosCor = prepararBusca(S.fbCor), termosTxt = prepararBusca(S.fbFiltro || ''), out = [];
+  ['Lesney', 'Superfast'].forEach(aba => (S.items[aba] || []).forEach(it => {
+    if (!casaBusca(norm(it.cor + ' ' + (it.outros || '')), termosCor)) return;
+    if (termosTxt.length && !casaBusca(norm([it.nome, it.mack, it.mack2, it.num, it.outros, it.adesivo].join(' ')), termosTxt)) return;
+    out.push({ aba: aba, it: it });
+  }));
+  $('#fbRes').innerHTML = '<div class="foto-credito"><b>' + out.length + '</b> na coleção com cor ' + esc(S.fbCor) + (S.fbFiltro ? ' e “' + esc(S.fbFiltro) + '”' : '') + (out.length > 40 ? ' (mostrando 40)' : '') + ':</div>' +
+    out.slice(0, 40).map(a => '<button class="card" data-fb-item="' + esc(a.it.id) + '" data-fb-aba="' + a.aba + '"><div class="thumb">' + capaDe(a) + '</div><div class="meio"><div class="nome">' + esc(a.it.nome) +
+      '</div><div class="sub"><span class="cod">' + esc(cmTxt(a.it)) + '</span> ' + esc([a.it.cor, a.aba].filter(Boolean).join(' · ')) + '</div></div></button>').join('');
+}
+$('#fbConteudo').addEventListener('click', e => {
+  const c = e.target.closest('[data-fb-cor]');
+  if (c) { S.fbCor = c.dataset.fbCor; $('#fbCores').querySelectorAll('button').forEach(b => b.classList.toggle('on', b === c)); listarPorCor(); return; }
+  if (e.target.closest('[data-fb-novo-cor]')) {
+    S.fotoPendente = S.fotoBusca; fechar('#pFotoBusca');
+    abrirForm({ cor: S.fbCor.charAt(0).toUpperCase() + S.fbCor.slice(1) }, false); toast('A foto será guardada junto ao salvar');
+  }
+});
+$('#fbConteudo').addEventListener('input', e => { if (e.target.id === 'fbRefinar') { S.fbFiltro = e.target.value; listarPorCor(); } });
+
+/* ================================================================ ícone na tela do celular */
+function abrirInstalar() {
+  const ios = /iPhone|iPad|iPod/i.test(navigator.userAgent);
+  const android = ['Abra o app no <b>Chrome</b> (o link que o Je enviou).', 'Toque nos <b>três pontinhos</b> no canto de cima, à direita.',
+    'Escolha <b>Adicionar à tela inicial</b> (ou “Instalar app”).', 'Confirme o nome <b>Matchbox</b> e toque em <b>Adicionar</b>.'];
+  const iphone = ['Abra o app no <b>Safari</b>.', 'Toque no botão <b>Compartilhar</b> (quadrado com seta para cima).',
+    'Escolha <b>Adicionar à Tela de Início</b>.', 'Confirme o nome <b>Matchbox</b> e toque em <b>Adicionar</b>.'];
+  const passos = (t, l) => '<div class="secao"><h3>' + t + '</h3><ol class="passos-inst">' + l.map(x => '<li>' + x + '</li>').join('') + '</ol></div>';
+  $('#iConteudo').innerHTML = '<div style="width:160px;height:160px;margin:6px auto 12px">' + logoSvg() + '</div>' +
+    '<div class="foto-credito" style="text-align:center">O ícone do app: caixa amarela Matchbox com o carrinho.</div>' +
+    (ios ? passos('No iPhone', iphone) + passos('No Android', android) : passos('No celular Android', android) + passos('No iPhone', iphone)) +
+    '<div class="secao"><h3>Guardar a imagem do ícone</h3><div class="foto-credito">Para usar como papel de parede, figurinha ou num atalho personalizado.</div>' +
+    '<div class="acoes"><a class="btn prim" id="baixarIcone" style="text-align:center;text-decoration:none" download="Matchbox-icone.png" href="#">Baixar ícone (PNG)</a></div>' +
+    '<div class="foto-credito">Se o botão não baixar, toque e segure a imagem abaixo e escolha “Salvar imagem”.</div><img id="iconePng" class="icone-grande" alt="Ícone Matchbox" hidden></div>';
+  abrir('#pInstalar');
+  api('getIconeData').then(d => { $('#baixarIcone').href = d; const im = $('#iconePng'); im.src = d; im.hidden = false; }).catch(() => {});
+}
+
+/* ================================================================ lista de procura */
+function naProcura(cod) { return !!(S.procura && S.procura.some(x => x.c && codeNorm(x.c) === codeNorm(cod))); }
+function hoje() { const d = new Date(); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); }
+function carregarProcura() {
+  if (S.mack) return Promise.resolve();
+  return apiJ('getListaMack').then(d => { S.mack = d.modelos || {}; S.procura = d.procura || []; S.nomesCache = {}; renderLista(); });
+}
+function gravarProcura() {
+  return apiJ('setProcura', S.procura).then(l => { S.procura = l; renderFiltros(); }).catch(err => toast('Não gravou a lista: ' + err.message, true));
+}
+function alternarProcura(cod, desc, aba) {
+  const pronto = S.procura ? Promise.resolve() : carregarProcura();
+  return pronto.then(() => {
+    const i = S.procura.findIndex(x => x.c && codeNorm(x.c) === codeNorm(cod));
+    if (i >= 0) { S.procura.splice(i, 1); toast(cod + ' saiu da lista de procura'); }
+    else { S.procura.push({ c: cod, t: desc || '', em: hoje(), a: aba || 'Lesney' }); toast(cod + ' entrou na lista de procura'); }
+    return gravarProcura();
+  });
+}
+function variacoesQueTenho() {
+  const m = {};
+  (S.items.Lesney || []).forEach(it => { const p = cm(it); if (p && p.v != null) (m[p.n + p.l] = m[p.n + p.l] || new Set()).add(p.v); });
+  return m;
+}
+function abrirProcura() {
+  $('#prConteudo').innerHTML = '<div class="carregando">Carregando a lista do Charlie Mack…</div>';
+  abrir('#pProcura');
+  carregarProcura().then(renderProcura).catch(err => { $('#prConteudo').innerHTML = '<div class="aviso dup">' + esc(err.message) + '</div>'; });
+}
+function renderProcura() {
+  const lista = S.procura || [];
+  let h = '<div class="pr-abas"><button data-pr-aba="faltam" class="' + (S.prAba === 'faltam' ? 'on' : '') + '">O que falta (Mack)</button>' +
+    '<button data-pr-aba="lista" class="' + (S.prAba === 'lista' ? 'on' : '') + '">Minha lista (' + lista.length + ')</button></div>';
+  if (S.prAba === 'lista') {
+    h += '<div class="foto-credito" style="margin-bottom:8px">Leve esta lista para a feira. Toque em "Enviar" (no alto) para mandar pelo WhatsApp.</div>' +
+      '<form class="pr-add" id="prAdd"><input name="t" placeholder="Anotar outra peça (ex.: Superfast 5A Lotus azul)" autocomplete="off"><button>Anotar</button></form>';
+    h += lista.length ? lista.map((x, i) => '<div class="pr-var"><span class="vn">' + esc(x.c || '·') + '</span><span class="tx">' + esc(traduzir(x.t) || x.t) +
+      (traduzir(x.t) ? '<small>' + esc(x.t) + '</small>' : '') + '<small>anotado em ' + esc(fmtData(x.em)) + '</small></span>' +
+      '<button class="estrela on" data-pr-tirar="' + i + '">Tirar</button></div>').join('')
+      : '<div class="vazio">A lista está vazia.<br>Na aba "O que falta", toque em "Procurar" nas variações que deseja.</div>';
+    $('#prConteudo').innerHTML = h; return;
+  }
+  const mods = S.mack || {}, tenho = variacoesQueTenho();
+  const codigos = Object.keys(mods).sort((a, b) => (parseInt(a) - parseInt(b)) || a.localeCompare(b));
+  if (!codigos.length) { $('#prConteudo').innerHTML = h + '<div class="aviso info">A lista do Charlie Mack ainda não foi importada. Ela entra pela importação de referência (menu da planilha &gt; Matchbox App &gt; Importar referência e fotos).</div>'; return; }
+  h += '<div class="pr-filtro"><input type="search" id="prQ" placeholder="Buscar modelo, código ou cor (ex.: verde, 21C)" value="' + esc(S.prQ) + '"></div>' +
+    '<label class="pr-op"><input type="checkbox" id="prSo"' + (S.prSo ? ' checked' : '') + '> Só modelos que já tenho na coleção</label>';
+  const termos = prepararBusca(S.prQ);
+  let blocos = [], totFalta = 0;
+  codigos.forEach(cod => {
+    const m = mods[cod], meus = tenho[cod] || new Set();
+    if (S.prSo && !meus.size) return;
+    let faltam = m.v.filter(v => !meus.has(v[0]));
+    const nomeH = norm(cod + ' ' + formatCode('Lesney', parseInt(cod), cod.slice(-1)) + ' ' + m.n);
+    if (termos.length) {
+      faltam = faltam.filter(v => casaBusca(nomeH + ' ' + norm(v[1] + ' ' + traduzir(v[1])), termos));
+      if (!faltam.length) return;
+    }
+    if (!faltam.length) return;
+    totFalta += faltam.length;
+    blocos.push({ cod: cod, m: m, faltam: faltam, meus: m.v.filter(v => meus.has(v[0])).length });
+  });
+  h += '<div class="foto-credito" style="margin-bottom:8px">' + blocos.length + ' modelos · ' + totFalta + ' variações que faltam (só Lesney com rodas regulares; a lista do Charlie Mack não cobre a Superfast).</div>';
+  h += blocos.slice(0, S.prLim).map(b => {
+    const n = parseInt(b.cod), l = b.cod.slice(-1), total = b.m.v.length, pct = Math.round(100 * b.meus / Math.max(total, 1));
+    return '<div class="pr-modelo"><h4>' + esc(formatCode('Lesney', n, l)) + ' · ' + esc(b.m.n) + (b.m.a ? ' (' + b.m.a + ')' : '') + '</h4>' +
+      '<div class="prog">Tenho ' + b.meus + ' de ' + total + ' variações</div><div class="barra"><i style="width:' + pct + '%"></i></div>' +
+      b.faltam.map(v => { const cod = formatCode('Lesney', n, l, v[0]), pt = traduzir(v[1]);
+        return '<div class="pr-var"><span class="vn">' + esc(cod) + '</span><span class="tx">' + esc(pt || v[1]) + (pt ? '<small>' + esc(v[1]) + '</small>' : '') + '</span>' +
+          '<button class="estrela' + (naProcura(cod) ? ' on' : '') + '" data-pr-marcar="' + esc(cod) + '" data-desc="' + esc(v[1]) + '">' + (naProcura(cod) ? 'Procurando' : 'Procurar') + '</button></div>'; }).join('') + '</div>';
+  }).join('');
+  if (blocos.length > S.prLim) h += '<button class="mais" data-pr-mais="1">Mostrar mais modelos (' + (blocos.length - S.prLim) + ')</button>';
+  $('#prConteudo').innerHTML = h;
+}
+let prTimer;
+$('#prConteudo').addEventListener('input', e => {
+  if (e.target.id === 'prQ') { clearTimeout(prTimer); const pos = e.target.selectionStart; prTimer = setTimeout(() => { S.prQ = e.target.value; S.prLim = 40; renderProcura(); const q = $('#prQ'); if (q) { q.focus(); q.setSelectionRange(pos, pos); } }, 250); }
+});
+$('#prConteudo').addEventListener('change', e => { if (e.target.id === 'prSo') { S.prSo = e.target.checked; S.prLim = 40; renderProcura(); } });
+$('#prConteudo').addEventListener('submit', e => {
+  e.preventDefault(); const inp = e.target.elements.t, t = inp.value.trim(); if (!t) return;
+  S.procura.push({ c: '', t: t, em: hoje(), a: '' }); inp.value = ''; renderProcura(); gravarProcura().then(renderProcura);
+});
+$('#prConteudo').addEventListener('click', e => {
+  const b = e.target.closest('[data-pr-aba],[data-pr-marcar],[data-pr-tirar],[data-pr-mais]'); if (!b) return;
+  if (b.dataset.prAba) { S.prAba = b.dataset.prAba; renderProcura(); return; }
+  if (b.dataset.prMais) { S.prLim += 60; renderProcura(); return; }
+  if (b.dataset.prTirar != null) { S.procura.splice(+b.dataset.prTirar, 1); renderProcura(); gravarProcura(); return; }
+  if (b.dataset.prMarcar) {
+    const on = !naProcura(b.dataset.prMarcar);
+    b.classList.toggle('on', on); b.textContent = on ? 'Procurando' : 'Procurar';
+    alternarProcura(b.dataset.prMarcar, b.dataset.desc, 'Lesney');
+  }
+});
+$('#prCompartilhar').addEventListener('click', () => {
+  const l = S.procura || [];
+  if (!l.length) { toast('A lista de procura está vazia.'); return; }
+  const txt = 'Lista de procura · Matchbox (Marco Geus)\n\n' + l.map(x => '- ' + (x.c ? x.c + ' ' : '') + (traduzir(x.t) || x.t)).join('\n');
+  compartilharTexto(txt, null);
+});
+
+/* ================================================================ compartilhar */
+function compartilharTexto(txt, arquivo) {
+  if (navigator.share) {
+    const dados = { text: txt };
+    if (arquivo && navigator.canShare && navigator.canShare({ files: [arquivo] })) dados.files = [arquivo];
+    return navigator.share(dados).catch(err => { if (err && err.name === 'AbortError') return; abrirWhats(txt); });
+  }
+  abrirWhats(txt); return Promise.resolve();
+}
+function abrirWhats(txt) { window.open('https://wa.me/?text=' + encodeURIComponent(txt), '_blank', 'noopener'); }
+function compartilharItem(it) {
+  const aba = S.aba, cod = cmTxt(it);
+  const linha = (rot, v) => v !== '' && v != null ? rot + ': ' + v : '';
+  const r = refInfo(it.fotoRef);
+  const txt = ['Matchbox ' + (aba === 'Lesney' ? 'Lesney' : 'Superfast') + ' No. ' + it.num + ' · ' + it.nome, 'Código Mack: ' + cod,
+    linha('Cor', it.cor), linha('Rodas', it.roda), linha('Base', it.base), linha('Interior', it.interior), linha('Vidro', it.vidro),
+    linha('Outros detalhes', it.outros), linha('Adesivo', it.adesivo), linha('Ano', it.ano), linha('Conservação', it.cons), linha('Caixa', it.caixa),
+    !fotosMarco(it).length && r.id ? 'Foto de referência: ' + bancoUrl(r.id, 800) : '', '', 'Coleção Marco Geus'].filter((x, i, a) => x !== '' || i === a.length - 2).join('\n');
+  const fm = fotosMarco(it);
+  if (!fm.length) { compartilharTexto(txt, null); return; }
+  toast('Preparando a foto…');
+  api('getDrivePhoto', fm[0], 1200).then(d => fetch(d)).then(res => res.blob())
+    .then(b => compartilharTexto(txt, new File([b], 'matchbox-' + codeNorm(it.mack2 || it.mack) + '.jpg', { type: b.type || 'image/jpeg' })))
+    .catch(() => compartilharTexto(txt, null));
+}
+
+/* ================================================================ comparar fotos */
+function abrirComparar(it) {
+  const fotos = listaFotos(it);
+  const iA = Math.max(0, fotos.findIndex(f => f.tipo === 'marco'));
+  let iB = fotos.findIndex((f, i) => i !== iA && f.tipo === 'ref' && f.melhor);
+  if (iB < 0) iB = fotos.findIndex((f, i) => i !== iA);
+  S.cmp = { it: it, fotos: fotos, a: iA, b: Math.max(iB, 0) };
+  $('#cTitulo').textContent = 'Comparar · ' + (S.aba === 'Lesney' ? (it.mack2 || it.mack) : it.mack);
+  renderComparar(); abrir('#pComparar');
+}
+function renderComparar() {
+  const c = S.cmp, it = c.it, fotos = c.fotos;
+  const lado = (k, rot) => {
+    const f = fotos[c[k]];
+    const extra = f.tipo === 'marco' ? 'data-drive="' + esc(f.id) + '"' : (f.orig && f.orig !== f.src ? 'data-orig="' + esc(f.orig) + '"' : '');
+    return '<div class="cmp-lado"><div class="rot"><button data-cmp="' + k + '" data-d="-1" aria-label="Anterior">&lsaquo;</button><span>' + rot + ' · ' +
+      (f.tipo === 'marco' ? 'foto do Marco' : 'referência') + ' (' + (c[k] + 1) + '/' + fotos.length + ')</span><button data-cmp="' + k + '" data-d="1" aria-label="Próxima">&rsaquo;</button></div>' +
+      '<div class="img">' + imgTag(f.src, extra) + '</div>' +
+      (f.tipo === 'ref' ? '<div class="leg">' + marcar(f.legenda || '', f.marcadas) + (f.fonte ? '<br>Fonte: ' + esc(f.fonte) : '') + '</div>' : '') + '</div>';
+  };
+  let h = '<div class="cmp">' + lado('a', 'A') + lado('b', 'B') + '</div>';
+  const ref = S.refCache[it.id], pc = cm(it), vm = ref && ref.variacoes && pc && ref.variacoes.find(v => v.v === pc.v);
+  if (vm) h += '<div class="aviso info" style="margin-top:12px"><b>Variação ' + esc(cmTxt(it)) + ' segundo Charlie Mack:</b> ' + esc(vm.desc) + (traduzir(vm.desc) ? '<br><small>' + esc(traduzir(vm.desc)) + '</small>' : '') + '</div>';
+  const dist = distintivos(it), dk = Object.keys(dist);
+  if (dk.length) h += '<div class="destaques"><h3>Confira nas fotos</h3>' + dk.map(k => '<span class="dchip"><b>' + esc(label(k)) + ':</b>' + esc(it[k] || '(vazio)') +
+    '<i>nas outras variações: ' + esc(dist[k].join(' / ')) + '</i></span>').join('') + '</div>';
+  h += '<div class="foto-credito">As palavras destacadas na legenda são as que batem com a descrição deste exemplar.</div>';
+  $('#cConteudo').innerHTML = h;
+}
+$('#cConteudo').addEventListener('click', e => {
+  const b = e.target.closest('[data-cmp]'); if (!b) return;
+  const c = S.cmp, n = c.fotos.length, k = b.dataset.cmp, outro = k === 'a' ? 'b' : 'a';
+  let v = (c[k] + (+b.dataset.d) + n) % n; if (v === c[outro] && n > 2) v = (v + (+b.dataset.d) + n) % n;
+  c[k] = v; renderComparar();
+});
+
+/* ================================================================ início */
+document.querySelectorAll('.logo-mini,.avatar').forEach(el => { el.innerHTML = logoSvg(); });
+document.body.classList.toggle('realce', S.realce);
+$('.avatar').addEventListener('click', () => { S.filtro = null; S.q = ''; $('#q').value = ''; renderLista(); });
+renderFiltros(); ajustarTopo();
+const demora = setTimeout(() => erroSplash('Está demorando mais que o normal. Se continuar assim, abra a URL do app com ?diag=1 no final.'), 30000);
+carregar().then(() => {
+  clearTimeout(demora); renderLista(); $('#splash').style.display = 'none'; ajustarTopo();
+  apiJ('getSeguranca').then(atualizarStatusSeg).catch(() => {});
+  setTimeout(() => carregarProcura().catch(() => {}), 2500);
+})
+  .catch(err => { clearTimeout(demora); erroSplash('Erro ao abrir: ' + err.message); });
+
+window.__matchbox = S; // útil para diagnóstico no console
+window.__mbFoto = { acharObjeto: acharObjeto, corDominante: corDominante, carregarImg: carregarImg, filtrar: filtrar };
+})();
+</script>
